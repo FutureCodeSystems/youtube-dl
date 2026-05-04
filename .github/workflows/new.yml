@@ -25,9 +25,12 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Start WARP Container
+      - name: Setup WARP (with fallback)
         run: |
+          # Create network
           docker network create warp-net || true
+          
+          # Run WARP container with better configuration
           docker run -d \
             --name warp \
             --restart=always \
@@ -37,15 +40,37 @@ jobs:
             --sysctl net.ipv6.conf.all.disable_ipv6=0 \
             --sysctl net.ipv4.conf.all.src_valid_mark=1 \
             -v warp-data:/var/lib/cloudflare-warp \
-            caomingjun/warp
-          echo "Waiting WARP..."
-          sleep 30
-          for i in {1..10}; do
-            curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace | grep -q "warp=on" && break
+            caomingjun/warp:latest
+          
+          # Wait for WARP to initialize
+          echo "⏳ Waiting for WARP to start (max 60s)..."
+          WARP_READY=false
+          for i in {1..12}; do
             sleep 5
+            # Check if container is running
+            if docker ps | grep -q warp; then
+              # Test proxy
+              if curl -s --max-time 5 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -qE "warp=(on|plus)"; then
+                echo "✅ WARP proxy is ready"
+                WARP_READY=true
+                break
+              else
+                echo "⏳ Attempt $i/12 - WARP not responding yet"
+              fi
+            else
+              echo "⚠️ Container not running, attempt $i/12"
+            fi
           done
+          
+          # If WARP failed, set flag for fallback
+          if [ "$WARP_READY" = false ]; then
+            echo "⚠️ WARP failed to start. Will try without proxy (may fail if YouTube is blocked)."
+            echo "WARP_FAILED=true" >> $GITHUB_ENV
+          else
+            echo "WARP_FAILED=false" >> $GITHUB_ENV
+          fi
 
-      - name: Install Dependencies (with aria2)
+      - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pip ffmpeg aria2 curl
@@ -56,15 +81,29 @@ jobs:
           URL="${{ github.event.inputs.youtube_url }}"
           QUALITY="${{ github.event.inputs.quality }}"
           mkdir -p videos
-
-          VIDEO_ID=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-id --no-playlist "$URL")
-          VIDEO_TITLE=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-title --no-playlist "$URL" | sed 's/[^a-zA-Z0-9\-_ ]/ /g' | cut -c1-100)
-          if [ -z "$VIDEO_ID" ]; then echo "❌ Failed to get video ID"; exit 1; fi
-
+          
+          # Determine proxy option
+          if [ "$WARP_FAILED" = "true" ]; then
+            PROXY_OPT=""
+            echo "⚠️ Running without proxy"
+          else
+            PROXY_OPT="--proxy socks5://127.0.0.1:1080"
+            echo "✅ Using WARP proxy"
+          fi
+          
+          # Get video info
+          VIDEO_ID=$(yt-dlp $PROXY_OPT --get-id --no-playlist "$URL")
+          VIDEO_TITLE=$(yt-dlp $PROXY_OPT --get-title --no-playlist "$URL" | sed 's/[^a-zA-Z0-9\-_ ]/ /g' | cut -c1-100)
+          if [ -z "$VIDEO_ID" ]; then
+            echo "❌ Failed to get video ID"
+            exit 1
+          fi
+          
           VIDEO_DIR="videos/${VIDEO_ID}"
           SEGMENTS_DIR="${VIDEO_DIR}/segments"
           mkdir -p "$SEGMENTS_DIR"
-
+          
+          # Metadata
           {
             echo "Video ID: $VIDEO_ID"
             echo "Original Title: ${VIDEO_TITLE:-Unknown}"
@@ -72,7 +111,8 @@ jobs:
             echo "Download Date: $(date)"
             echo "Quality Requested: $QUALITY"
           } > "${VIDEO_DIR}/video_info.txt"
-
+          
+          # Quality list
           case "$QUALITY" in
             best)   QUALITIES=("1080" "720" "480") ;;
             1080)   QUALITIES=("1080") ;;
@@ -81,13 +121,15 @@ jobs:
             audio)  QUALITIES=("audio") ;;
             *)      QUALITIES=("1080" "720" "480") ;;
           esac
-
+          
+          # Function for each quality
           process_quality() {
             local Q="$1"
             local TEMP_MP4="tmp_${Q}.mp4"
+            
             if [ "$Q" == "audio" ]; then
               echo "🎵 Downloading audio..."
-              yt-dlp --proxy "socks5://127.0.0.1:1080" \
+              yt-dlp $PROXY_OPT \
                 --format "bestaudio" \
                 --extract-audio --audio-format m4a \
                 --output "${SEGMENTS_DIR}/audio.m4a" \
@@ -99,15 +141,18 @@ jobs:
                 }
               return
             fi
+            
             echo "🎬 Processing ${Q}p"
-            yt-dlp --proxy "socks5://127.0.0.1:1080" \
+            # Try direct MP4 first
+            yt-dlp $PROXY_OPT \
               --format "best[height<=${Q}][ext=mp4]/best[height<=${Q}]" \
               --output "$TEMP_MP4" \
               --no-playlist --no-mtime --no-post-overwrites \
               --concurrent-fragments 10 --buffer-size 64K \
               --downloader aria2c --downloader-args "aria2c:-x 16 -s 16 -k 1M" \
               "$URL" 2>&1 | grep -v "Merger\|Deleting" || {
-                yt-dlp --proxy "socks5://127.0.0.1:1080" \
+                # Fallback with merge
+                yt-dlp $PROXY_OPT \
                   --format "bestvideo[height<=${Q}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${Q}][ext=mp4]" \
                   --merge-output-format mp4 \
                   --output "$TEMP_MP4" \
@@ -115,7 +160,12 @@ jobs:
                   --concurrent-fragments 10 \
                   "$URL"
               }
-            if [ ! -f "$TEMP_MP4" ]; then echo "⚠️ ${Q}p unavailable"; return; fi
+            
+            if [ ! -f "$TEMP_MP4" ]; then
+              echo "⚠️ ${Q}p unavailable"
+              return
+            fi
+            
             mkdir -p "${SEGMENTS_DIR}/${Q}p"
             ffmpeg -i "$TEMP_MP4" \
               -c:v libx264 -preset ultrafast -crf 28 -tune fastdecode \
@@ -125,14 +175,19 @@ jobs:
               -hls_flags independent_segments \
               -threads auto \
               "${VIDEO_DIR}/${Q}p.m3u8" -loglevel error
+            
             sed -i "s|${Q}p/segment_|segments/${Q}p/segment_|g" "${VIDEO_DIR}/${Q}p.m3u8"
             rm -f "$TEMP_MP4"
             echo "✅ ${Q}p done"
           }
-
-          for Q in "${QUALITIES[@]}"; do process_quality "$Q" & done
+          
+          # Run in parallel
+          for Q in "${QUALITIES[@]}"; do
+            process_quality "$Q" &
+          done
           wait
-
+          
+          # Create master.m3u8
           MASTER="${VIDEO_DIR}/master.m3u8"
           printf '#EXTM3U\n#EXT-X-VERSION:3\n' > "$MASTER"
           for Q in "${QUALITIES[@]}"; do
@@ -141,10 +196,11 @@ jobs:
               printf '%sp.m3u8\n' "$Q" >> "$MASTER"
             fi
           done
-          [ -f "${VIDEO_DIR}/audio.m3u8" ] && {
+          if [ -f "${VIDEO_DIR}/audio.m3u8" ]; then
             printf '#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS="mp4a.40.2"\naudio.m3u8\n' >> "$MASTER"
-          }
-
+          fi
+          
+          # Generate player.html using printf lines (safe for YAML)
           PLAYER_FILE="${VIDEO_DIR}/player.html"
           printf '%s\n' '<!DOCTYPE html>' > "$PLAYER_FILE"
           printf '%s\n' '<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no"><title>AVASAM Player</title><link href="https://vjs.zencdn.net/8.10/video-js.min.css" rel="stylesheet"><style>body{background:#000;margin:0;padding:0}.video-js{width:100%;height:100vh}.vjs-menu-button-popup .vjs-menu{width:8em}</style></head><body><video id="player" class="video-js vjs-16-9 vjs-big-play-centered" controls preload="auto" playsinline></video><script src="https://vjs.zencdn.net/8.10/video.min.js"></script><script>' >> "$PLAYER_FILE"
@@ -170,12 +226,14 @@ jobs:
           printf '%s\n' '}).catch(e=>console.error(e));' >> "$PLAYER_FILE"
           printf '%s\n' '})();' >> "$PLAYER_FILE"
           printf '%s\n' '</script></body></html>' >> "$PLAYER_FILE"
-
+          
           echo "✅ Done. Output: $VIDEO_DIR"
 
-      - name: Stop WARP
+      - name: Stop WARP (if running)
         if: always()
-        run: docker stop warp || true
+        run: |
+          docker stop warp || true
+          docker rm warp || true
 
       - name: Commit & Push
         run: |
