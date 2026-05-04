@@ -1,4 +1,4 @@
-name: 01- 🎬 Youtube Downloader
+name: 01- 🚀 Youtube Downloader (Ultra Fast)
 
 on:
   workflow_dispatch:
@@ -8,13 +8,13 @@ on:
         required: true
         type: string
       quality:
-        description: 'Video quality (best, 1080, 720, 480, audio)'
+        description: 'Quality (best, 1080, 720, 480, audio)'
         required: false
         default: 'best'
         type: string
 
 jobs:
-  download-youtube:
+  ultra-fast-download:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -25,423 +25,181 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Start WARP Container
+      - name: Start WARP (for geo-restrictions)
         run: |
-          echo "🚀 Starting Cloudflare WARP container..."
           docker network create warp-net || true
-          docker run -d \
-            --name warp \
-            --restart=always \
-            --network warp-net \
-            -p 1080:1080 \
-            --cap-add NET_ADMIN \
-            --sysctl net.ipv6.conf.all.disable_ipv6=0 \
-            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
-            -v warp-data:/var/lib/cloudflare-warp \
+          docker run -d --name warp --restart=always --network warp-net -p 1080:1080 \
+            --cap-add NET_ADMIN --sysctl net.ipv6.conf.all.disable_ipv6=0 \
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 -v warp-data:/var/lib/cloudflare-warp \
             caomingjun/warp
-          echo "⏳ Waiting for WARP to initialize (30 seconds)..."
-          sleep 30
-          echo "🔍 Checking WARP status..."
-          for i in {1..10}; do
-            RESULT=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
-            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
-              echo "✅ WARP is active!"
-              echo "$RESULT"
-              break
-            else
-              echo "⏳ Attempt $i/10 - WARP not ready yet, waiting..."
-              sleep 10
-            fi
-          done
-          FINAL=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
-          if echo "$FINAL" | grep -qE "warp=(on|plus)"; then
-            echo "✅ WARP proxy is ready!"
-          else
-            echo "⚠️ WARP might not be fully active, but continuing anyway..."
-            echo "Response: $FINAL"
-          fi
+          sleep 20
+          echo "✅ WARP proxy ready"
 
-      - name: Install Dependencies
+      - name: Install Dependencies (Parallel)
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip ffmpeg zip curl jq bc
+          sudo apt-get install -y python3-pip ffmpeg aria2
           pip3 install --upgrade yt-dlp
 
-      - name: Download & Convert to HLS
+      - name: 🚀 Ultra Fast Download & HLS
         run: |
           URL="${{ github.event.inputs.youtube_url }}"
           QUALITY="${{ github.event.inputs.quality }}"
           
           mkdir -p videos
+          echo "⚡ AVASAM Ultra Fast Mode"
+          echo "📹 $URL"
           
-          echo "══════════════════════════════════════════════════════"
-          echo "🏷️  AVASAM HLS YouTube Downloader"
-          echo "🌐 https://avasam.ir"
-          echo "══════════════════════════════════════════════════════"
-          echo ""
-          echo "📹 Downloading: $URL"
-          echo ""
-          
-          VIDEO_ID=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-id --no-playlist "$URL" 2>/dev/null)
-          VIDEO_TITLE=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-title --no-playlist "$URL" 2>/dev/null | sed 's/[^a-zA-Z0-9\-_ ]/ /g' | cut -c1-100)
-          
-          if [ -z "$VIDEO_ID" ]; then
-            echo "❌ Failed to get video ID"
-            exit 1
-          fi
+          VIDEO_ID=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-id "$URL")
+          VIDEO_TITLE=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-title "$URL" | sed 's/[^a-zA-Z0-9\-_]/_/g' | cut -c1-50)
+          [ -z "$VIDEO_ID" ] && exit 1
           
           VIDEO_DIR="videos/${VIDEO_ID}"
           SEGMENTS_DIR="${VIDEO_DIR}/segments"
           mkdir -p "$SEGMENTS_DIR"
           
-          echo "📌 Video ID: $VIDEO_ID"
-          echo "📌 Video Title: ${VIDEO_TITLE:-Unknown}"
-          echo "📌 Output Folder: $VIDEO_DIR"
-          echo "🎯 Quality: $QUALITY"
-          echo ""
+          echo "ID: $VIDEO_ID"
+          echo "Title: $VIDEO_TITLE"
           
-          printf '%s\n' "Video ID: $VIDEO_ID" > "${VIDEO_DIR}/video_info.txt"
-          printf '%s\n' "Original Title: ${VIDEO_TITLE:-Unknown}" >> "${VIDEO_DIR}/video_info.txt"
-          printf '%s\n' "YouTube URL: $URL" >> "${VIDEO_DIR}/video_info.txt"
-          printf '%s\n' "Download Date: $(date)" >> "${VIDEO_DIR}/video_info.txt"
-          printf '%s\n' "Quality Requested: $QUALITY" >> "${VIDEO_DIR}/video_info.txt"
+          # ذخیره اطلاعات
+          cat > "${VIDEO_DIR}/video_info.txt" <<-EOF
+          Video ID: $VIDEO_ID
+          Title: $VIDEO_TITLE
+          URL: $URL
+          Date: $(date)
+          Quality: $QUALITY
+          EOF
           
-          declare -a QUALITIES=()
+          # تعیین کیفیت‌ها
           case "$QUALITY" in
-            "best")
-              QUALITIES=("1080" "720" "480")
-              ;;
-            "1080")
-              QUALITIES=("1080")
-              ;;
-            "720")
-              QUALITIES=("720")
-              ;;
-            "480")
-              QUALITIES=("480")
-              ;;
-            "audio")
-              QUALITIES=("audio")
-              ;;
+            best)   QUALITIES=("1080" "720" "480") ;;
+            1080)   QUALITIES=("1080") ;;
+            720)    QUALITIES=("720") ;;
+            480)    QUALITIES=("480") ;;
+            audio)  QUALITIES=("audio") ;;
+            *)      QUALITIES=("720") ;;
           esac
           
-          for Q in "${QUALITIES[@]}"; do
+          # تابع دانلود سریع یک کیفیت (اجرای موازی)
+          download_quality() {
+            local Q="$1"
+            local TEMP_VIDEO="tmp_${Q}.mp4"
+            
             if [ "$Q" == "audio" ]; then
-              echo "🎵 Downloading audio only..."
-              yt-dlp \
-                --proxy "socks5://127.0.0.1:1080" \
+              yt-dlp --proxy "socks5://127.0.0.1:1080" \
                 --format "bestaudio" \
-                --extract-audio \
-                --audio-format m4a \
+                --extract-audio --audio-format m4a \
                 --output "${SEGMENTS_DIR}/audio.m4a" \
-                --no-playlist \
-                "$URL" || continue
+                --no-playlist --no-mtime --concurrent-fragments 10 \
+                "$URL" 2>&1 | grep -v "Deleting original"
               
-              printf '#EXTM3U\n' > "${VIDEO_DIR}/audio.m3u8"
-              printf '#EXT-X-VERSION:3\n' >> "${VIDEO_DIR}/audio.m3u8"
-              printf '#EXT-X-ALLOW-CACHE:YES\n' >> "${VIDEO_DIR}/audio.m3u8"
-              printf '#EXT-X-TARGETDURATION:10\n' >> "${VIDEO_DIR}/audio.m3u8"
-              printf '#EXT-X-MEDIA-SEQUENCE:0\n' >> "${VIDEO_DIR}/audio.m3u8"
-              printf '#EXTINF:10.0,\n' >> "${VIDEO_DIR}/audio.m3u8"
-              printf 'segments/audio.m4a\n' >> "${VIDEO_DIR}/audio.m3u8"
-              printf '#EXT-X-ENDLIST\n' >> "${VIDEO_DIR}/audio.m3u8"
-              
-              echo "✅ Audio downloaded"
-              continue
+              # بساز audio.m3u8
+              printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-ALLOW-CACHE:YES\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:10.0,\nsegments/audio.m4a\n#EXT-X-ENDLIST\n' > "${VIDEO_DIR}/audio.m3u8"
+              return
             fi
             
-            echo "🎬 Processing quality: ${Q}p"
-            TEMP_VIDEO="tmp_${Q}.mp4"
-            
-            yt-dlp \
-              --proxy "socks5://127.0.0.1:1080" \
-              --format "bestvideo[height<=${Q}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${Q}][ext=mp4]/best" \
-              --merge-output-format mp4 \
+            # بهترین فرمت‌های موجود بدون نیاز به merge (اولویت highest quality MP4)
+            yt-dlp --proxy "socks5://127.0.0.1:1080" \
+              --format "best[height<=${Q}][ext=mp4]/best[height<=${Q}]" \
               --output "$TEMP_VIDEO" \
-              --no-playlist \
-              "$URL" || continue
+              --no-playlist --no-mtime --concurrent-fragments 16 \
+              --downloader aria2c --downloader-args "aria2c:-x 16 -s 16 -k 1M" \
+              --no-cache-dir --no-post-overwrites \
+              "$URL" 2>&1 | grep -v "Downloading"
             
             if [ ! -f "$TEMP_VIDEO" ]; then
-              echo "⚠️ Quality ${Q}p not available, skipping..."
-              continue
+              echo "⚠️ Fallback to merge for ${Q}p"
+              yt-dlp --proxy "socks5://127.0.0.1:1080" \
+                --format "bestvideo[height<=${Q}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${Q}][ext=mp4]" \
+                --merge-output-format mp4 \
+                --output "$TEMP_VIDEO" \
+                --no-playlist --no-mtime --concurrent-fragments 16 \
+                "$URL" 2>&1 | grep -v "Merger\|Deleting"
             fi
             
-            mkdir -p "${SEGMENTS_DIR}/${Q}p"
-            
-            ffmpeg -i "$TEMP_VIDEO" \
-              -c:v libx264 -crf 23 -preset medium \
-              -c:a aac -b:a 128k \
-              -f hls \
-              -hls_time 10 \
-              -hls_list_size 0 \
-              -hls_segment_filename "${SEGMENTS_DIR}/${Q}p/segment_%03d.ts" \
-              -hls_flags independent_segments \
-              "${VIDEO_DIR}/${Q}p.m3u8" 2>/dev/null
-            
-            sed -i "s|${Q}p/segment_|segments/${Q}p/segment_|g" "${VIDEO_DIR}/${Q}p.m3u8"
-            rm -f "$TEMP_VIDEO"
-            
-            SEGMENT_COUNT=$(ls "${SEGMENTS_DIR}/${Q}p"/*.ts 2>/dev/null | wc -l)
-            TOTAL_SIZE=$(du -sh "${SEGMENTS_DIR}/${Q}p" 2>/dev/null | cut -f1)
-            echo "   ✅ ${Q}p: $SEGMENT_COUNT segments, total size: $TOTAL_SIZE"
+            if [ -f "$TEMP_VIDEO" ]; then
+              mkdir -p "${SEGMENTS_DIR}/${Q}p"
+              # ffmpeg ultrafast preset + crf 28 (کمترین زمان با کیفیت قابل قبول)
+              ffmpeg -i "$TEMP_VIDEO" \
+                -c:v libx264 -preset ultrafast -crf 28 \
+                -c:a aac -b:a 96k \
+                -f hls -hls_time 6 -hls_list_size 0 \
+                -hls_segment_filename "${SEGMENTS_DIR}/${Q}p/seg_%03d.ts" \
+                -hls_flags independent_segments \
+                "${VIDEO_DIR}/${Q}p.m3u8" 2>/dev/null
+              
+              sed -i "s|${Q}p/seg_|segments/${Q}p/seg_|g" "${VIDEO_DIR}/${Q}p.m3u8"
+              rm -f "$TEMP_VIDEO"
+              echo "✅ ${Q}p done"
+            else
+              echo "❌ ${Q}p failed"
+            fi
+          }
+          
+          # اجرای موازی همه کیفیت‌ها
+          for Q in "${QUALITIES[@]}"; do
+            download_quality "$Q" &
           done
+          wait
           
-          MASTER_PLAYLIST="${VIDEO_DIR}/master.m3u8"
-          printf '#EXTM3U\n' > "$MASTER_PLAYLIST"
-          printf '#EXT-X-VERSION:3\n' >> "$MASTER_PLAYLIST"
-          
+          # ساخت master.m3u8
+          MASTER="${VIDEO_DIR}/master.m3u8"
+          echo "#EXTM3U" > "$MASTER"
+          echo "#EXT-X-VERSION:3" >> "$MASTER"
           for Q in "${QUALITIES[@]}"; do
             if [ "$Q" != "audio" ] && [ -f "${VIDEO_DIR}/${Q}p.m3u8" ]; then
-              BANDWIDTH=$((Q * 1000))
-              printf '#EXT-X-STREAM-INF:BANDWIDTH=%d000,RESOLUTION=1920x%s\n' "$BANDWIDTH" "$Q" >> "$MASTER_PLAYLIST"
-              printf '%sp.m3u8\n' "$Q" >> "$MASTER_PLAYLIST"
+              BANDW=$((Q * 1000))
+              echo "#EXT-X-STREAM-INF:BANDWIDTH=${BANDW}000,RESOLUTION=1920x${Q}" >> "$MASTER"
+              echo "${Q}p.m3u8" >> "$MASTER"
             fi
           done
+          [ -f "${VIDEO_DIR}/audio.m3u8" ] && echo "#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"mp4a.40.2\"" >> "$MASTER" && echo "audio.m3u8" >> "$MASTER"
           
-          if [ -f "${VIDEO_DIR}/audio.m3u8" ]; then
-            printf '#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS="mp4a.40.2"\n' >> "$MASTER_PLAYLIST"
-            printf 'audio.m3u8\n' >> "$MASTER_PLAYLIST"
-          fi
+          # ساده‌ترین پلیر (فقط لینک‌های raw)
+          cat > "${VIDEO_DIR}/player.html" <<-EOF
+          <!DOCTYPE html>
+          <html><head><meta charset="UTF-8"><title>🎬 AVASAM Player</title>
+          <link href="https://vjs.zencdn.net/8.10.0/video-js.min.css" rel="stylesheet">
+          <style>body{margin:0;background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh}.video-js{width:100%;height:auto;aspect-ratio:16/9}</style>
+          </head><body>
+          <video id="player" class="video-js vjs-big-play-centered" controls></video>
+          <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
+          <script>
+          const videoId = window.location.pathname.match(/\\/videos\\/([^\\/]+)/)[1];
+          const base = 'https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/videos/'+videoId;
+          fetch(base+'/master.m3u8').then(r=>r.text()).then(data=>{
+            const qualities={};
+            const lines=data.split('\\n');
+            for(let i=0;i<lines.length;i++){
+              if(lines[i].includes('RESOLUTION')){
+                const match=lines[i].match(/RESOLUTION=\\d+x(\\d+)/);
+                if(match){
+                  const url=lines[i+1].trim();
+                  qualities[match[1]]=url.startsWith('http')?url:base+'/'+url;
+                }
+              }
+            }
+            const best=Object.keys(qualities).sort((a,b)=>b-a)[0];
+            videojs('player',{src:qualities[best],type:'application/x-mpegURL',html5:{hls:{enableLowInitialPlaylist:true}}});
+          });
+          </script>
+          </body></html>
+          EOF
           
-          # ساخت فایل پلیر HTML
-          PLAYER_HTML="${VIDEO_DIR}/player.html"
-          
-          echo '<!DOCTYPE html>' > "$PLAYER_HTML"
-          echo '<html>' >> "$PLAYER_HTML"
-          echo '<head>' >> "$PLAYER_HTML"
-          echo '<meta charset="UTF-8">' >> "$PLAYER_HTML"
-          echo '<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">' >> "$PLAYER_HTML"
-          echo '<title>🎬 AVASAM Player</title>' >> "$PLAYER_HTML"
-          echo '<link href="https://vjs.zencdn.net/8.10.0/video-js.min.css" rel="stylesheet">' >> "$PLAYER_HTML"
-          echo '<style>' >> "$PLAYER_HTML"
-          echo '*{margin:0;padding:0;box-sizing:border-box}' >> "$PLAYER_HTML"
-          echo 'body{background:#0a0a0a;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;min-height:100vh;display:flex;justify-content:center;align-items:center;padding:20px}' >> "$PLAYER_HTML"
-          echo '.player-wrapper{max-width:1280px;width:100%;margin:0 auto;background:#000;border-radius:16px;overflow:hidden;box-shadow:0 25px 50px -12px rgba(0,0,0,0.5)}' >> "$PLAYER_HTML"
-          echo '.video-container{position:relative;background:#000}' >> "$PLAYER_HTML"
-          echo '.video-js{width:100%;height:auto;aspect-ratio:16/9}' >> "$PLAYER_HTML"
-          echo '.info-bar{background:#1a1a1a;padding:16px 20px;color:#fff;border-top:1px solid #333}' >> "$PLAYER_HTML"
-          echo '.video-title{font-size:18px;font-weight:600;margin-bottom:8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}' >> "$PLAYER_HTML"
-          echo '.video-title span{background:#2a2a2a;padding:4px 12px;border-radius:20px;font-size:12px;font-weight:400;color:#aaa}' >> "$PLAYER_HTML"
-          echo '.video-meta{font-size:13px;color:#888;display:flex;gap:20px;flex-wrap:wrap;align-items:center}' >> "$PLAYER_HTML"
-          echo '.video-meta a{color:#3b82f6;text-decoration:none}' >> "$PLAYER_HTML"
-          echo '.video-meta a:hover{text-decoration:underline}' >> "$PLAYER_HTML"
-          echo '.loading-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.9);display:flex;justify-content:center;align-items:center;z-index:9999;flex-direction:column;gap:20px}' >> "$PLAYER_HTML"
-          echo '.loading-spinner{width:50px;height:50px;border:4px solid #333;border-top-color:#3b82f6;border-radius:50%;animation:spin 1s linear infinite}' >> "$PLAYER_HTML"
-          echo '.loading-text{color:#fff;font-size:14px}' >> "$PLAYER_HTML"
-          echo '@keyframes spin{to{transform:rotate(360deg)}}' >> "$PLAYER_HTML"
-          echo '.error-box{background:#dc2626;color:#fff;padding:12px 20px;border-radius:12px;margin:20px;text-align:center}' >> "$PLAYER_HTML"
-          echo '@media (max-width:768px){body{padding:10px}.video-title{font-size:14px}.video-meta{font-size:11px}}' >> "$PLAYER_HTML"
-          echo '</style>' >> "$PLAYER_HTML"
-          echo '</head>' >> "$PLAYER_HTML"
-          echo '<body>' >> "$PLAYER_HTML"
-          echo '<div class="player-wrapper">' >> "$PLAYER_HTML"
-          echo '<div class="video-container">' >> "$PLAYER_HTML"
-          echo '<video id="avasam-player" class="video-js vjs-big-play-centered vjs-16-9 vjs-fluid" controls preload="auto" playsinline>' >> "$PLAYER_HTML"
-          echo '<p class="vjs-no-js">برای پخش ویدیو به JavaScript نیاز است</p>' >> "$PLAYER_HTML"
-          echo '</video>' >> "$PLAYER_HTML"
-          echo '</div>' >> "$PLAYER_HTML"
-          echo '<div class="info-bar" id="info-bar" style="display:none">' >> "$PLAYER_HTML"
-          echo '<div class="video-title">' >> "$PLAYER_HTML"
-          echo '<span id="video-id"></span>' >> "$PLAYER_HTML"
-          echo '<span id="video-quality-badge">Auto</span>' >> "$PLAYER_HTML"
-          echo '</div>' >> "$PLAYER_HTML"
-          echo '<div class="video-meta">' >> "$PLAYER_HTML"
-          echo '<span>🔗 <a id="youtube-link" href="#" target="_blank">مشاهده در یوتیوب</a></span>' >> "$PLAYER_HTML"
-          echo '<span>📅 <span id="download-date"></span></span>' >> "$PLAYER_HTML"
-          echo '<span>💾 <span id="video-size"></span></span>' >> "$PLAYER_HTML"
-          echo '</div>' >> "$PLAYER_HTML"
-          echo '</div>' >> "$PLAYER_HTML"
-          echo '</div>' >> "$PLAYER_HTML"
-          echo '<div class="loading-overlay" id="loading-overlay">' >> "$PLAYER_HTML"
-          echo '<div class="loading-spinner"></div>' >> "$PLAYER_HTML"
-          echo '<div class="loading-text">🔄 در حال بارگذاری ویدیو...</div>' >> "$PLAYER_HTML"
-          echo '</div>' >> "$PLAYER_HTML"
-          echo '<script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>' >> "$PLAYER_HTML"
-          echo '<script>' >> "$PLAYER_HTML"
-          echo '(function(){' >> "$PLAYER_HTML"
-          echo 'function getVideoIdFromPath(){' >> "$PLAYER_HTML"
-          echo 'var path=window.location.pathname;' >> "$PLAYER_HTML"
-          echo 'var match=path.match(/\/videos\/([^\/]+)\//);' >> "$PLAYER_HTML"
-          echo 'if(match&&match[1])return match[1];' >> "$PLAYER_HTML"
-          echo 'match=path.match(/\/videos\/([^\/]+)$/);' >> "$PLAYER_HTML"
-          echo 'if(match&&match[1])return match[1];' >> "$PLAYER_HTML"
-          echo 'return null;' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo 'var VIDEO_ID=getVideoIdFromPath();' >> "$PLAYER_HTML"
-          echo 'var BASE_RAW_URL="https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}";' >> "$PLAYER_HTML"
-          echo 'var VIDEO_BASE_URL=BASE_RAW_URL+"/videos/"+VIDEO_ID;' >> "$PLAYER_HTML"
-          echo 'var MASTER_M3U8_URL=VIDEO_BASE_URL+"/master.m3u8";' >> "$PLAYER_HTML"
-          echo 'var player=null;' >> "$PLAYER_HTML"
-          echo 'async function loadVideoInfo(){' >> "$PLAYER_HTML"
-          echo 'try{' >> "$PLAYER_HTML"
-          echo 'var infoUrl=VIDEO_BASE_URL+"/video_info.txt";' >> "$PLAYER_HTML"
-          echo 'var response=await fetch(infoUrl);' >> "$PLAYER_HTML"
-          echo 'if(response.ok){' >> "$PLAYER_HTML"
-          echo 'var text=await response.text();' >> "$PLAYER_HTML"
-          echo 'var lines=text.split("\n");' >> "$PLAYER_HTML"
-          echo 'for(var i=0;i<lines.length;i++){' >> "$PLAYER_HTML"
-          echo 'if(lines[i].startsWith("Original Title:")){' >> "$PLAYER_HTML"
-          echo 'var title=lines[i].replace("Original Title:","").trim();' >> "$PLAYER_HTML"
-          echo 'if(title)document.title="🎬 "+title;' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo 'if(lines[i].startsWith("YouTube URL:")){' >> "$PLAYER_HTML"
-          echo 'var youtubeUrl=lines[i].replace("YouTube URL:","").trim();' >> "$PLAYER_HTML"
-          echo 'var ytLink=document.getElementById("youtube-link");' >> "$PLAYER_HTML"
-          echo 'if(ytLink)ytLink.href=youtubeUrl;' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo 'if(lines[i].startsWith("Download Date:")){' >> "$PLAYER_HTML"
-          echo 'var date=lines[i].replace("Download Date:","").trim();' >> "$PLAYER_HTML"
-          echo 'var dateSpan=document.getElementById("download-date");' >> "$PLAYER_HTML"
-          echo 'if(dateSpan)dateSpan.textContent=date;' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo '}catch(e){console.log("Info not available");}' >> "$PLAYER_HTML"
-          echo 'var idSpan=document.getElementById("video-id");' >> "$PLAYER_HTML"
-          echo 'if(idSpan)idSpan.textContent=VIDEO_ID;' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo 'async function fetchQualities(){' >> "$PLAYER_HTML"
-          echo 'try{' >> "$PLAYER_HTML"
-          echo 'var response=await fetch(MASTER_M3U8_URL);' >> "$PLAYER_HTML"
-          echo 'if(!response.ok)throw new Error("master.m3u8 not found");' >> "$PLAYER_HTML"
-          echo 'var content=await response.text();' >> "$PLAYER_HTML"
-          echo 'var lines=content.split("\n");' >> "$PLAYER_HTML"
-          echo 'var qualities=[];' >> "$PLAYER_HTML"
-          echo 'for(var i=0;i<lines.length;i++){' >> "$PLAYER_HTML"
-          echo 'var line=lines[i].trim();' >> "$PLAYER_HTML"
-          echo 'if(line.includes("#EXT-X-STREAM-INF")){' >> "$PLAYER_HTML"
-          echo 'var resolutionMatch=line.match(/RESOLUTION=\d+x(\d+)/);' >> "$PLAYER_HTML"
-          echo 'var urlLine=lines[i+1]?lines[i+1].trim():"";' >> "$PLAYER_HTML"
-          echo 'if(resolutionMatch&&urlLine){' >> "$PLAYER_HTML"
-          echo 'var quality=resolutionMatch[1];' >> "$PLAYER_HTML"
-          echo 'var playlistUrl=urlLine;' >> "$PLAYER_HTML"
-          echo 'if(!playlistUrl.startsWith("http")){' >> "$PLAYER_HTML"
-          echo 'playlistUrl=VIDEO_BASE_URL+"/"+playlistUrl;' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo 'qualities.push({quality:parseInt(quality),label:quality+"p",url:playlistUrl});' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo 'qualities.sort(function(a,b){return b.quality-a.quality;});' >> "$PLAYER_HTML"
-          echo 'for(var i=0;i<lines.length;i++){' >> "$PLAYER_HTML"
-          echo 'if(lines[i].includes("CODECS")&&lines[i].includes("mp4a")){' >> "$PLAYER_HTML"
-          echo 'var audioUrl=lines[i+1]?lines[i+1].trim():"";' >> "$PLAYER_HTML"
-          echo 'if(audioUrl&&!audioUrl.startsWith("http")){' >> "$PLAYER_HTML"
-          echo 'audioUrl=VIDEO_BASE_URL+"/"+audioUrl;' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo 'if(audioUrl){' >> "$PLAYER_HTML"
-          echo 'qualities.push({quality:0,label:"🎵 فقط صدا",url:audioUrl});' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo 'break;' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo 'return qualities;' >> "$PLAYER_HTML"
-          echo '}catch(error){' >> "$PLAYER_HTML"
-          echo 'console.error("Error fetching qualities:",error);' >> "$PLAYER_HTML"
-          echo 'throw error;' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo 'async function initPlayer(){' >> "$PLAYER_HTML"
-          echo 'try{' >> "$PLAYER_HTML"
-          echo 'var qualities=await fetchQualities();' >> "$PLAYER_HTML"
-          echo 'if(qualities.length===0)throw new Error("هیچ کیفیتی یافت نشد");' >> "$PLAYER_HTML"
-          echo 'document.getElementById("loading-overlay").style.display="none";' >> "$PLAYER_HTML"
-          echo 'document.getElementById("info-bar").style.display="block";' >> "$PLAYER_HTML"
-          echo 'player=videojs("avasam-player",{controls:true,autoplay:false,preload:"auto",fluid:true,html5:{hls:{enableLowInitialPlaylist:true,smoothQualityChange:true,overrideNative:true}}});' >> "$PLAYER_HTML"
-          echo 'player.ready(function(){' >> "$PLAYER_HTML"
-          echo 'var controlBar=player.controlBar;' >> "$PLAYER_HTML"
-          echo 'var qualityButton=document.createElement("button");' >> "$PLAYER_HTML"
-          echo 'qualityButton.className="vjs-quality-selector vjs-menu-button vjs-menu-button-popup vjs-button";' >> "$PLAYER_HTML"
-          echo 'qualityButton.setAttribute("aria-label","کیفیت");' >> "$PLAYER_HTML"
-          echo 'qualityButton.innerHTML="<span class=\"vjs-icon-placeholder\" aria-hidden=\"true\"></span><span class=\"vjs-quality-label\">720p</span>";' >> "$PLAYER_HTML"
-          echo 'var menu=document.createElement("div");' >> "$PLAYER_HTML"
-          echo 'menu.className="vjs-menu";' >> "$PLAYER_HTML"
-          echo 'var menuContent=document.createElement("ul");' >> "$PLAYER_HTML"
-          echo 'menuContent.className="vjs-menu-content";' >> "$PLAYER_HTML"
-          echo 'for(var i=0;i<qualities.length;i++){' >> "$PLAYER_HTML"
-          echo 'var q=qualities[i];' >> "$PLAYER_HTML"
-          echo 'var item=document.createElement("li");' >> "$PLAYER_HTML"
-          echo 'item.className="vjs-menu-item";' >> "$PLAYER_HTML"
-          echo 'item.innerHTML=q.label;' >> "$PLAYER_HTML"
-          echo 'item.setAttribute("data-url",q.url);' >> "$PLAYER_HTML"
-          echo 'item.onclick=(function(url,label){' >> "$PLAYER_HTML"
-          echo 'return function(){' >> "$PLAYER_HTML"
-          echo 'var currentTime=player.currentTime();' >> "$PLAYER_HTML"
-          echo 'var wasPlaying=!player.paused();' >> "$PLAYER_HTML"
-          echo 'player.src({src:url,type:"application/x-mpegURL"});' >> "$PLAYER_HTML"
-          echo 'player.ready(function(){' >> "$PLAYER_HTML"
-          echo 'player.currentTime(currentTime);' >> "$PLAYER_HTML"
-          echo 'if(wasPlaying)player.play();' >> "$PLAYER_HTML"
-          echo '});' >> "$PLAYER_HTML"
-          echo 'qualityButton.querySelector(".vjs-quality-label").innerHTML=label;' >> "$PLAYER_HTML"
-          echo '};' >> "$PLAYER_HTML"
-          echo '})(q.url,q.label);' >> "$PLAYER_HTML"
-          echo 'menuContent.appendChild(item);' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo 'menu.appendChild(menuContent);' >> "$PLAYER_HTML"
-          echo 'qualityButton.appendChild(menu);' >> "$PLAYER_HTML"
-          echo 'var spacer=controlBar.addChild("component");' >> "$PLAYER_HTML"
-          echo 'spacer.el().style.flex="1";' >> "$PLAYER_HTML"
-          echo 'controlBar.el().appendChild(qualityButton);' >> "$PLAYER_HTML"
-          echo 'var bestQuality=qualities[0];' >> "$PLAYER_HTML"
-          echo 'if(bestQuality&&bestQuality.quality!==0){' >> "$PLAYER_HTML"
-          echo 'player.src({src:bestQuality.url,type:"application/x-mpegURL"});' >> "$PLAYER_HTML"
-          echo 'qualityButton.querySelector(".vjs-quality-label").innerHTML=bestQuality.label;' >> "$PLAYER_HTML"
-          echo '}else if(qualities[1]){' >> "$PLAYER_HTML"
-          echo 'player.src({src:qualities[1].url,type:"application/x-mpegURL"});' >> "$PLAYER_HTML"
-          echo 'qualityButton.querySelector(".vjs-quality-label").innerHTML=qualities[1].label;' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo '});' >> "$PLAYER_HTML"
-          echo 'loadVideoInfo();' >> "$PLAYER_HTML"
-          echo '}catch(error){' >> "$PLAYER_HTML"
-          echo 'console.error("Init error:",error);' >> "$PLAYER_HTML"
-          echo 'var loadingOverlay=document.getElementById("loading-overlay");' >> "$PLAYER_HTML"
-          echo 'if(loadingOverlay){' >> "$PLAYER_HTML"
-          echo 'loadingOverlay.innerHTML="<div class=\"error-box\">❌ خطا: "+error.message+"<br><br>🔗 "+MASTER_M3U8_URL+"</div>";' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo 'if(VIDEO_ID){' >> "$PLAYER_HTML"
-          echo 'initPlayer();' >> "$PLAYER_HTML"
-          echo '}else{' >> "$PLAYER_HTML"
-          echo 'document.getElementById("loading-overlay").innerHTML="<div class=\"error-box\">❌ آیدی ویدیو پیدا نشد<br><br>مسیر صحیح:<br>/videos/[VIDEO_ID]/player.html</div>";' >> "$PLAYER_HTML"
-          echo '}' >> "$PLAYER_HTML"
-          echo '})();' >> "$PLAYER_HTML"
-          echo '</script>' >> "$PLAYER_HTML"
-          echo '</body>' >> "$PLAYER_HTML"
-          echo '</html>' >> "$PLAYER_HTML"
-          
-          echo ""
-          echo "══════════════════════════════════════════════════════"
-          echo "✅ دانلود و تبدیل با موفقیت انجام شد!"
-          echo "══════════════════════════════════════════════════════"
-          echo ""
-          echo "📁 مسیر خروجی: ${VIDEO_DIR}/"
-          echo "🎬 آیدی ویدیو: $VIDEO_ID"
-          echo "📝 عنوان: ${VIDEO_TITLE:-Unknown}"
-          echo ""
-          echo "🌐 لینک پلیر:"
-          echo "   https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/${VIDEO_DIR}/player.html"
-          echo ""
-          echo "══════════════════════════════════════════════════════"
-          
-          rm -f tmp_*.mp4
+          echo "════════════════════════════════════════════"
+          echo "✅ Done! Video ID: $VIDEO_ID"
+          echo "Player: https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/${VIDEO_DIR}/player.html"
+          echo "════════════════════════════════════════════"
 
-      - name: Stop WARP Container
+      - name: Stop WARP
         if: always()
-        run: |
-          docker stop warp || true
-          docker rm warp || true
+        run: docker stop warp || true; docker rm warp || true
 
-      - name: Commit & Push
+      - name: Push to GitHub
         run: |
           git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          BRANCH="${GITHUB_REF_NAME}"
-          
+          git config user.email "actions@github.com"
           git add videos/
-          git commit -m "[AVASAM] دانلود ویدیو و تبدیل به HLS [skip ci]" || true
-          git pull --rebase origin "$BRANCH" || true
-          git push origin HEAD:"$BRANCH" || true
-          
-          echo "✅ همه فایل‌ها با موفقیت آپلود شدند!"
+          git commit -m "🚀 Ultra fast video [skip ci]" || true
+          git pull --rebase origin "${{ github.ref_name }}" || true
+          git push origin HEAD:"${{ github.ref_name }}"
