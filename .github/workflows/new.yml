@@ -1,4 +1,4 @@
-name: 01- 🚀 Youtube Downloader (Ultra Fast)
+name: 01- 🚀 Youtube Downloader (No-Stall)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ on:
         type: string
 
 jobs:
-  ultra-fast-download:
+  ultra-fast:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -22,184 +22,166 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Start WARP (for geo-restrictions)
+      - name: Setup WARP
         run: |
           docker network create warp-net || true
-          docker run -d --name warp --restart=always --network warp-net -p 1080:1080 \
+          docker run -d --name warp --network warp-net -p 1080:1080 \
             --cap-add NET_ADMIN --sysctl net.ipv6.conf.all.disable_ipv6=0 \
-            --sysctl net.ipv4.conf.all.src_valid_mark=1 -v warp-data:/var/lib/cloudflare-warp \
-            caomingjun/warp
-          sleep 20
-          echo "✅ WARP proxy ready"
+            --sysctl net.ipv4.conf.all.src_valid_mark=1 \
+            -v warp-data:/var/lib/cloudflare-warp caomingjun/warp
+          sleep 25
+          echo "WARP ready"
 
-      - name: Install Dependencies (Parallel)
+      - name: Install tools
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pip ffmpeg aria2
-          pip3 install --upgrade yt-dlp
+          pip install --upgrade yt-dlp
 
-      - name: 🚀 Ultra Fast Download & HLS
+      - name: 🚀 Download & HLS (parallel, no merge stall)
         run: |
           URL="${{ github.event.inputs.youtube_url }}"
           QUALITY="${{ github.event.inputs.quality }}"
           
           mkdir -p videos
-          echo "⚡ AVASAM Ultra Fast Mode"
-          echo "📹 $URL"
+          echo "=== AVASAM Ultra Fast Mode ==="
+          echo "URL: $URL"
           
-          VIDEO_ID=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-id "$URL")
-          VIDEO_TITLE=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-title "$URL" | sed 's/[^a-zA-Z0-9\-_]/_/g' | cut -c1-50)
+          VIDEO_ID=$(yt-dlp --proxy socks5://127.0.0.1:1080 --get-id "$URL")
+          VIDEO_TITLE=$(yt-dlp --proxy socks5://127.0.0.1:1080 --get-title "$URL" | tr ' ' '_' | cut -c1-50)
           [ -z "$VIDEO_ID" ] && exit 1
           
-          VIDEO_DIR="videos/${VIDEO_ID}"
-          SEGMENTS_DIR="${VIDEO_DIR}/segments"
+          VIDEO_DIR="videos/$VIDEO_ID"
+          SEGMENTS_DIR="$VIDEO_DIR/segments"
           mkdir -p "$SEGMENTS_DIR"
           
-          echo "ID: $VIDEO_ID"
+          echo "Video ID: $VIDEO_ID"
           echo "Title: $VIDEO_TITLE"
           
-          # ذخیره اطلاعات
-          cat > "${VIDEO_DIR}/video_info.txt" <<-EOF
+          cat > "$VIDEO_DIR/video_info.txt" <<-EOF
           Video ID: $VIDEO_ID
           Title: $VIDEO_TITLE
           URL: $URL
           Date: $(date)
-          Quality: $QUALITY
           EOF
           
-          # تعیین کیفیت‌ها
           case "$QUALITY" in
-            best)   QUALITIES=("1080" "720" "480") ;;
-            1080)   QUALITIES=("1080") ;;
-            720)    QUALITIES=("720") ;;
-            480)    QUALITIES=("480") ;;
-            audio)  QUALITIES=("audio") ;;
-            *)      QUALITIES=("720") ;;
+            best)   RESOLUTIONS=("1080" "720" "480") ;;
+            1080)   RESOLUTIONS=("1080") ;;
+            720)    RESOLUTIONS=("720") ;;
+            480)    RESOLUTIONS=("480") ;;
+            audio)  RESOLUTIONS=("audio") ;;
+            *)      RESOLUTIONS=("720") ;;
           esac
           
-          # تابع دانلود سریع یک کیفیت (اجرای موازی)
-          download_quality() {
-            local Q="$1"
-            local TEMP_VIDEO="tmp_${Q}.mp4"
-            
-            if [ "$Q" == "audio" ]; then
-              yt-dlp --proxy "socks5://127.0.0.1:1080" \
-                --format "bestaudio" \
-                --extract-audio --audio-format m4a \
-                --output "${SEGMENTS_DIR}/audio.m4a" \
-                --no-playlist --no-mtime --concurrent-fragments 10 \
-                "$URL" 2>&1 | grep -v "Deleting original"
-              
-              # بساز audio.m3u8
-              printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-ALLOW-CACHE:YES\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:10.0,\nsegments/audio.m4a\n#EXT-X-ENDLIST\n' > "${VIDEO_DIR}/audio.m3u8"
+          # تابع دانلود مستقیم MP4 (بدون merge) و تبدیل سریع
+          proc() {
+            local res="$1"
+            if [ "$res" = "audio" ]; then
+              echo "🎵 Downloading audio ..."
+              yt-dlp --proxy socks5://127.0.0.1:1080 -f bestaudio --extract-audio --audio-format m4a \
+                -o "$SEGMENTS_DIR/audio.m4a" --no-playlist --no-mtime --concurrent-fragments 10 "$URL" >/dev/null 2>&1
+              printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:10.0,\nsegments/audio.m4a\n#EXT-X-ENDLIST\n' > "$VIDEO_DIR/audio.m3u8"
+              echo "✅ Audio done"
               return
             fi
             
-            # بهترین فرمت‌های موجود بدون نیاز به merge (اولویت highest quality MP4)
-            yt-dlp --proxy "socks5://127.0.0.1:1080" \
-              --format "best[height<=${Q}][ext=mp4]/best[height<=${Q}]" \
-              --output "$TEMP_VIDEO" \
-              --no-playlist --no-mtime --concurrent-fragments 16 \
+            echo "🎬 ${res}p downloading ..."
+            # مهم: انتخاب فرمتی که نیازی به merge ندارد (بهترین ویدئو + صدا در یک فایل)
+            # اولویت best با فرمت mp4 (که اکثراً آماده است)
+            yt-dlp --proxy socks5://127.0.0.1:1080 \
+              --format "best[height<=${res}][ext=mp4]/best[height<=${res}]" \
+              -o "tmp_${res}.mp4" --no-playlist --no-mtime --concurrent-fragments 16 \
               --downloader aria2c --downloader-args "aria2c:-x 16 -s 16 -k 1M" \
-              --no-cache-dir --no-post-overwrites \
-              "$URL" 2>&1 | grep -v "Downloading"
+              "$URL" >/dev/null 2>&1
             
-            if [ ! -f "$TEMP_VIDEO" ]; then
-              echo "⚠️ Fallback to merge for ${Q}p"
-              yt-dlp --proxy "socks5://127.0.0.1:1080" \
-                --format "bestvideo[height<=${Q}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${Q}][ext=mp4]" \
-                --merge-output-format mp4 \
-                --output "$TEMP_VIDEO" \
-                --no-playlist --no-mtime --concurrent-fragments 16 \
-                "$URL" 2>&1 | grep -v "Merger\|Deleting"
+            # اگر فایل ساخته نشد (فرمت مستقیم نبود) از merge استفاده کن (کمتر اتفاق می‌افتد)
+            if [ ! -f "tmp_${res}.mp4" ]; then
+              echo "⚠️ ${res}p fallback to merge ..."
+              yt-dlp --proxy socks5://127.0.0.1:1080 \
+                --format "bestvideo[height<=${res}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${res}][ext=mp4]" \
+                --merge-output-format mp4 -o "tmp_${res}.mp4" --no-playlist --no-mtime "$URL" >/dev/null 2>&1
             fi
             
-            if [ -f "$TEMP_VIDEO" ]; then
-              mkdir -p "${SEGMENTS_DIR}/${Q}p"
-              # ffmpeg ultrafast preset + crf 28 (کمترین زمان با کیفیت قابل قبول)
-              ffmpeg -i "$TEMP_VIDEO" \
+            if [ -f "tmp_${res}.mp4" ]; then
+              mkdir -p "$SEGMENTS_DIR/${res}p"
+              # تبدیل سریع HLS با ultrafast و سگمنت‌های ۶ ثانیه‌ای
+              ffmpeg -i "tmp_${res}.mp4" \
                 -c:v libx264 -preset ultrafast -crf 28 \
                 -c:a aac -b:a 96k \
                 -f hls -hls_time 6 -hls_list_size 0 \
-                -hls_segment_filename "${SEGMENTS_DIR}/${Q}p/seg_%03d.ts" \
+                -hls_segment_filename "$SEGMENTS_DIR/${res}p/seg_%03d.ts" \
                 -hls_flags independent_segments \
-                "${VIDEO_DIR}/${Q}p.m3u8" 2>/dev/null
+                "$VIDEO_DIR/${res}p.m3u8" 2>/dev/null
               
-              sed -i "s|${Q}p/seg_|segments/${Q}p/seg_|g" "${VIDEO_DIR}/${Q}p.m3u8"
-              rm -f "$TEMP_VIDEO"
-              echo "✅ ${Q}p done"
+              sed -i "s|${res}p/seg_|segments/${res}p/seg_|g" "$VIDEO_DIR/${res}p.m3u8"
+              rm -f "tmp_${res}.mp4"
+              echo "✅ ${res}p done"
             else
-              echo "❌ ${Q}p failed"
+              echo "❌ ${res}p failed"
             fi
           }
           
-          # اجرای موازی همه کیفیت‌ها
-          for Q in "${QUALITIES[@]}"; do
-            download_quality "$Q" &
+          # اجرای موازی برای همه رزولوشن‌ها
+          for r in "${RESOLUTIONS[@]}"; do
+            proc "$r" &
           done
           wait
           
           # ساخت master.m3u8
-          MASTER="${VIDEO_DIR}/master.m3u8"
+          MASTER="$VIDEO_DIR/master.m3u8"
           echo "#EXTM3U" > "$MASTER"
           echo "#EXT-X-VERSION:3" >> "$MASTER"
-          for Q in "${QUALITIES[@]}"; do
-            if [ "$Q" != "audio" ] && [ -f "${VIDEO_DIR}/${Q}p.m3u8" ]; then
-              BANDW=$((Q * 1000))
-              echo "#EXT-X-STREAM-INF:BANDWIDTH=${BANDW}000,RESOLUTION=1920x${Q}" >> "$MASTER"
-              echo "${Q}p.m3u8" >> "$MASTER"
+          for r in "${RESOLUTIONS[@]}"; do
+            if [ "$r" != "audio" ] && [ -f "$VIDEO_DIR/${r}p.m3u8" ]; then
+              echo "#EXT-X-STREAM-INF:BANDWIDTH=$((r*1000))000,RESOLUTION=1920x${r}" >> "$MASTER"
+              echo "${r}p.m3u8" >> "$MASTER"
             fi
           done
-          [ -f "${VIDEO_DIR}/audio.m3u8" ] && echo "#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"mp4a.40.2\"" >> "$MASTER" && echo "audio.m3u8" >> "$MASTER"
+          [ -f "$VIDEO_DIR/audio.m3u8" ] && echo "#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"mp4a.40.2\"" >> "$MASTER" && echo "audio.m3u8" >> "$MASTER"
           
-          # ساده‌ترین پلیر (فقط لینک‌های raw)
-          cat > "${VIDEO_DIR}/player.html" <<-EOF
-          <!DOCTYPE html>
-          <html><head><meta charset="UTF-8"><title>🎬 AVASAM Player</title>
-          <link href="https://vjs.zencdn.net/8.10.0/video-js.min.css" rel="stylesheet">
-          <style>body{margin:0;background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh}.video-js{width:100%;height:auto;aspect-ratio:16/9}</style>
-          </head><body>
-          <video id="player" class="video-js vjs-big-play-centered" controls></video>
-          <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
-          <script>
-          const videoId = window.location.pathname.match(/\\/videos\\/([^\\/]+)/)[1];
-          const base = 'https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/videos/'+videoId;
-          fetch(base+'/master.m3u8').then(r=>r.text()).then(data=>{
-            const qualities={};
-            const lines=data.split('\\n');
-            for(let i=0;i<lines.length;i++){
-              if(lines[i].includes('RESOLUTION')){
-                const match=lines[i].match(/RESOLUTION=\\d+x(\\d+)/);
-                if(match){
-                  const url=lines[i+1].trim();
-                  qualities[match[1]]=url.startsWith('http')?url:base+'/'+url;
-                }
-              }
-            }
-            const best=Object.keys(qualities).sort((a,b)=>b-a)[0];
-            videojs('player',{src:qualities[best],type:'application/x-mpegURL',html5:{hls:{enableLowInitialPlaylist:true}}});
-          });
-          </script>
-          </body></html>
-          EOF
+          # پلیر ساده و مطمئن (با printf)
+          PLAYER="$VIDEO_DIR/player.html"
+          printf '<!DOCTYPE html>\n' > "$PLAYER"
+          printf '<html><head><meta charset="UTF-8"><title>🎬 AVASAM</title>\n' >> "$PLAYER"
+          printf '<link href="https://vjs.zencdn.net/8.10.0/video-js.min.css" rel="stylesheet">\n' >> "$PLAYER"
+          printf '<style>body{margin:0;background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh}.video-js{width:100%;height:auto;aspect-ratio:16/9}</style>\n' >> "$PLAYER"
+          printf '</head><body>\n' >> "$PLAYER"
+          printf '<video id="player" class="video-js vjs-big-play-centered" controls></video>\n' >> "$PLAYER"
+          printf '<script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>\n' >> "$PLAYER"
+          printf '<script>\n' >> "$PLAYER"
+          printf 'const id = window.location.pathname.match(/\\/videos\\/([^\\/]+)/)[1];\n' >> "$PLAYER"
+          printf 'const base = "https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/videos/"+id;\n' >> "$PLAYER"
+          printf 'fetch(base+"/master.m3u8").then(r=>r.text()).then(data=>{\n' >> "$PLAYER"
+          printf '  const q={};\n' >> "$PLAYER"
+          printf '  const lines=data.split("\\n");\n' >> "$PLAYER"
+          printf '  for(let i=0;i<lines.length;i++){\n' >> "$PLAYER"
+          printf '    if(lines[i].includes("RESOLUTION")){\n' >> "$PLAYER"
+          printf '      const m=lines[i].match(/RESOLUTION=\\d+x(\\d+)/);\n' >> "$PLAYER"
+          printf '      if(m){ const url=lines[i+1].trim(); q[m[1]]=url.startsWith("http")?url:base+"/"+url; }\n' >> "$PLAYER"
+          printf '    }\n' >> "$PLAYER"
+          printf '  }\n' >> "$PLAYER"
+          printf '  const best=Object.keys(q).sort((a,b)=>b-a)[0];\n' >> "$PLAYER"
+          printf '  videojs("player",{src:q[best],type:"application/x-mpegURL",html5:{hls:{enableLowInitialPlaylist:true}}});\n' >> "$PLAYER"
+          printf '});\n' >> "$PLAYER"
+          printf '</script></body></html>\n' >> "$PLAYER"
           
-          echo "════════════════════════════════════════════"
-          echo "✅ Done! Video ID: $VIDEO_ID"
-          echo "Player: https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/${VIDEO_DIR}/player.html"
-          echo "════════════════════════════════════════════"
+          echo "============================================"
+          echo "✅ Completed in $(($SECONDS/60))m $(($SECONDS%60))s"
+          echo "Video ID: $VIDEO_ID"
+          echo "Player URL: https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/$VIDEO_DIR/player.html"
+          echo "============================================"
 
       - name: Stop WARP
         if: always()
         run: docker stop warp || true; docker rm warp || true
 
-      - name: Push to GitHub
+      - name: Push to Repo
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add videos/
           git commit -m "🚀 Ultra fast video [skip ci]" || true
-          git pull --rebase origin "${{ github.ref_name }}" || true
+          git pull --rebase origin "${{ github.ref_name }}"
           git push origin HEAD:"${{ github.ref_name }}"
