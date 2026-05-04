@@ -1,10 +1,10 @@
-name: YouTube → HLS Pro
+name: YouTube to HLS (Stable)
 
 on:
   workflow_dispatch:
     inputs:
       youtube_url:
-        description: "YouTube Video URL"
+        description: "YouTube video link"
         required: true
 
 jobs:
@@ -14,28 +14,39 @@ jobs:
       contents: write
 
     steps:
+      # -------------------------------------------------
+      # Step 1. Checkout repo
+      # -------------------------------------------------
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      # ---------------------------
-      # Enable Docker (No apt install!)
-      # ---------------------------
+      # -------------------------------------------------
+      # Step 2. Enable Docker (safe method)
+      # -------------------------------------------------
       - name: Setup Docker
         uses: docker/setup-buildx-action@v3
 
-      # ---------------------------
-      # Install Tools
-      # ---------------------------
+      # -------------------------------------------------
+      # Step 3. Install tools
+      # -------------------------------------------------
       - name: Install Dependencies
         run: |
           sudo apt update
           sudo apt install -y ffmpeg python3-pip curl
           pip3 install -U yt-dlp
 
-      # ---------------------------
-      # Start Cloudflare WARP
-      # ---------------------------
-      - name: Start WARP Proxy
+      # -------------------------------------------------
+      # Step 4. Login to GHCR (for WARP image access)
+      # -------------------------------------------------
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | \
+          docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      # -------------------------------------------------
+      # Step 5. Start WARP proxy container
+      # -------------------------------------------------
+      - name: Start Cloudflare WARP Proxy
         id: warp
         run: |
           docker run -d \
@@ -43,7 +54,7 @@ jobs:
             -p 1080:1080 \
             ghcr.io/virb3/wgcf-warp:latest
 
-          echo "Waiting for WARP..."
+          echo "Waiting for WARP proxy to be ready..."
           sleep 12
 
           if docker ps | grep warp; then
@@ -52,42 +63,44 @@ jobs:
             echo "warp_status=failed" >> $GITHUB_OUTPUT
           fi
 
-      # ---------------------------
-      # Download Video (Retry + Fallback)
-      # ---------------------------
-      - name: Download Video via WARP
+      # -------------------------------------------------
+      # Step 6. Download video (standard logic from your code)
+      # -------------------------------------------------
+      - name: Download YouTube Video (via WARP)
         id: download
         continue-on-error: true
         run: |
           mkdir input
+          echo "Downloading using SOCKS5 proxy..."
           yt-dlp \
             --proxy socks5://127.0.0.1:1080 \
             -f "bv*+ba/best" \
+            --merge-output-format mp4 \
             --retries 5 \
             --fragment-retries 5 \
             "${{ github.event.inputs.youtube_url }}" \
             -o "input/video.%(ext)s"
 
-      - name: Fallback Download Without Proxy
+      # Fallback Download without proxy (if WARP fails)
+      - name: Retry Without Proxy if WARP fails
         if: steps.download.outcome == 'failure'
         run: |
-          echo "WARP failed, retrying without proxy..."
+          echo "WARP download failed, retrying without proxy..."
           yt-dlp \
             -f "bv*+ba/best" \
+            --merge-output-format mp4 \
             --retries 5 \
-            --fragment-retries 5 \
             "${{ github.event.inputs.youtube_url }}" \
             -o "input/video.%(ext)s"
 
-      # ---------------------------
-      # Convert to Multi-Quality HLS
-      # ---------------------------
-      - name: Generate Adaptive HLS
+      # -------------------------------------------------
+      # Step 7. Convert to Adaptive Multi-quality HLS
+      # -------------------------------------------------
+      - name: Convert to HLS (1080p / 720p / 480p)
         run: |
           mkdir -p hls
-
-          INPUT=$(ls input/video.*)
-
+          INPUT=$(ls input/video.* | head -n 1)
+          
           ffmpeg -i "$INPUT" \
             -filter_complex \
             "[0:v]split=3[v1][v2][v3]; \
@@ -99,49 +112,51 @@ jobs:
             -map "[v3out]" -map 0:a \
             -c:v libx264 -preset veryfast -crf 23 \
             -c:a aac -ar 48000 -b:a 128k \
-            -f hls \
-            -hls_time 6 \
-            -hls_playlist_type vod \
+            -f hls -hls_time 6 -hls_playlist_type vod \
             -hls_flags independent_segments \
             -hls_segment_filename "hls/v%v/segment_%03d.ts" \
             -master_pl_name master.m3u8 \
             -var_stream_map "v:0,a:0 v:1,a:1 v:2,a:2" \
             hls/v%v/playlist.m3u8
 
-      # ---------------------------
-      # Generate Player HTML
-      # ---------------------------
-      - name: Create HTML Player
+      # -------------------------------------------------
+      # Step 8. Generate simple HLS player page (same logic)
+      # -------------------------------------------------
+      - name: Generate HTML Player
         run: |
-          cat <<EOF > hls/player.html
+          cat <<'EOF' > hls/player.html
           <!DOCTYPE html>
-          <html>
+          <html lang="en">
           <head>
             <meta charset="utf-8">
-            <title>HLS Stream</title>
+            <title>Adaptive HLS Player</title>
             <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+            <style>
+              body{background:#111;color:#fff;text-align:center;margin-top:50px;}
+              video{width:80%;border:2px solid #333;}
+            </style>
           </head>
-          <body style="background:#111;text-align:center;color:white">
+          <body>
             <h2>Adaptive HLS Stream</h2>
-            <video id="video" controls width="80%"></video>
+            <video id="video" controls></video>
             <script>
               const video = document.getElementById('video');
-              const source = 'master.m3u8';
-              if (Hls.isSupported()) {
-                const hls = new Hls();
-                hls.loadSource(source);
+              const src = 'master.m3u8';
+              if(Hls.isSupported()){
+                const hls=new Hls();
+                hls.loadSource(src);
                 hls.attachMedia(video);
-              } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = source;
+              }else if(video.canPlayType('application/vnd.apple.mpegurl')){
+                video.src=src;
               }
             </script>
           </body>
           </html>
           EOF
 
-      # ---------------------------
-      # Commit & Push
-      # ---------------------------
+      # -------------------------------------------------
+      # Step 9. Commit and push HLS output
+      # -------------------------------------------------
       - name: Commit HLS Output
         run: |
           git config user.name "github-actions"
@@ -151,5 +166,5 @@ jobs:
           cp -r hls/* videos/
 
           git add videos
-          git commit -m "Add Adaptive HLS Stream" || echo "No changes"
+          git commit -m "Add adaptive HLS stream" || echo "No changes to commit"
           git push
