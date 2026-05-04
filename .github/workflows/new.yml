@@ -52,7 +52,7 @@ jobs:
           docker run -d \
             --name warp \
             -p 1080:1080 \
-            ghcr.io/virb3/wgcf-warp:latest
+            ghcr.io/virb3/wgcf:latest
 
           echo "Waiting for WARP proxy to be ready..."
           sleep 12
