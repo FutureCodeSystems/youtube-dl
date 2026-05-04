@@ -1,170 +1,398 @@
-name: YouTube to HLS (Stable)
+- name: Download & Convert to HLS
+  run: |
+    URL="${{ github.event.inputs.youtube_url }}"
+    QUALITY="${{ github.event.inputs.quality }}"
+    
+    mkdir -p videos
+    
+    echo "🏷️  AVASAM HLS YouTube Downloader"
+    echo "🌐 https://avasam.ir"
+    echo ""
+    echo "📹 Downloading: $URL"
+    
+    # دریافت اطلاعات ویدئو
+    VIDEO_TITLE=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-title --no-playlist "$URL" 2>/dev/null | sed 's/[^a-zA-Z0-9\-_]/_/g')
+    VIDEO_ID=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-id "$URL" 2>/dev/null)
+    
+    if [ -z "$VIDEO_TITLE" ]; then
+      VIDEO_TITLE="video_${VIDEO_ID}"
+    fi
+    
+    # ایجاد پوشه اختصاصی برای این ویدئو
+    VIDEO_DIR="videos/${VIDEO_TITLE}"
+    SEGMENTS_DIR="${VIDEO_DIR}/segments"
+    mkdir -p "$SEGMENTS_DIR"
+    
+    echo "📁 Video title: $VIDEO_TITLE"
+    echo "🎯 Quality: $QUALITY"
+    
+    # تعیین کیفیت‌های مورد نظر
+    declare -a QUALITIES=()
+    case "$QUALITY" in
+      "best")
+        QUALITIES=("1080" "720" "480")
+        ;;
+      "1080")
+        QUALITIES=("1080")
+        ;;
+      "720")
+        QUALITIES=("720")
+        ;;
+      "480")
+        QUALITIES=("480")
+        ;;
+      "audio")
+        QUALITIES=("audio")
+        ;;
+    esac
+    
+    # دانلود و تبدیل به HLS برای هر کیفیت
+    for Q in "${QUALITIES[@]}"; do
+      if [ "$Q" == "audio" ]; then
+        echo "🎵 Downloading audio only..."
+        
+        # دانلود فقط صدا به فرمت m4a
+        yt-dlp \
+          --proxy "socks5://127.0.0.1:1080" \
+          --format "bestaudio" \
+          --extract-audio \
+          --audio-format m4a \
+          --output "${SEGMENTS_DIR}/audio.m4a" \
+          --no-playlist \
+          "$URL" || continue
+        
+        # ایجاد m3u8 ساده برای صدا
+        cat > "${VIDEO_DIR}/audio.m3u8" << EOF
+#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-ALLOW-CACHE:YES
+#EXT-X-TARGETDURATION:10
+#EXT-X-MEDIA-SEQUENCE:0
+#EXTINF:10.0,
+segments/audio.m4a
+#EXT-X-ENDLIST
+EOF
+        
+        echo "✅ Audio downloaded: ${SEGMENTS_DIR}/audio.m4a"
+        continue
+      fi
+      
+      echo "🎬 Processing quality: ${Q}p"
+      
+      # دانلود ویدئو با کیفیت مشخص
+      TEMP_VIDEO="tmp_${Q}.mp4"
+      
+      yt-dlp \
+        --proxy "socks5://127.0.0.1:1080" \
+        --format "bestvideo[height<=${Q}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${Q}][ext=mp4]/best" \
+        --merge-output-format mp4 \
+        --output "$TEMP_VIDEO" \
+        --no-playlist \
+        "$URL" || continue
+      
+      if [ ! -f "$TEMP_VIDEO" ]; then
+        echo "⚠️ Quality ${Q}p not available, skipping..."
+        continue
+      fi
+      
+      # ایجاد پوشه برای سگمنت‌های این کیفیت
+      mkdir -p "${SEGMENTS_DIR}/${Q}p"
+      
+      # تبدیل به HLS با ffmpeg
+      # سگمنت‌های ۱۰ ثانیه‌ای (حدود ۵-۱۰ مگابایت هر کدوم)
+      ffmpeg -i "$TEMP_VIDEO" \
+        -c:v libx264 -crf 23 -preset medium \
+        -c:a aac -b:a 128k \
+        -f hls \
+        -hls_time 10 \
+        -hls_list_size 0 \
+        -hls_segment_filename "${SEGMENTS_DIR}/${Q}p/segment_%03d.ts" \
+        -hls_flags independent_segments \
+        "${VIDEO_DIR}/${Q}p.m3u8" 2>/dev/null
+      
+      # اصلاح مسیرهای m3u8 (اضافه کردن segments/ به مسیرها)
+      sed -i "s|${Q}p/segment_|segments/${Q}p/segment_|g" "${VIDEO_DIR}/${Q}p.m3u8"
+      
+      # پاک کردن فایل تمپ
+      rm -f "$TEMP_VIDEO"
+      
+      # آماده‌سازی قطعات برای آپلود آرام
+      echo "✅ ${Q}p: Converted to $(ls ${SEGMENTS_DIR}/${Q}p/*.ts 2>/dev/null | wc -l) segments"
+      
+      # نمایش حجم کل
+      TOTAL_SIZE=$(du -sh "${SEGMENTS_DIR}/${Q}p" 2>/dev/null | cut -f1)
+      echo "   Total size: ~${TOTAL_SIZE}"
+    done
+    
+    # ایجاد master.m3u8 (پلی‌لیست اصلی با همه کیفیت‌ها)
+    MASTER_PLAYLIST="${VIDEO_DIR}/master.m3u8"
+    cat > "$MASTER_PLAYLIST" << 'EOF'
+#EXTM3U
+#EXT-X-VERSION:3
+EOF
+    
+    # اضافه کردن کیفیت‌های موجود
+    for Q in "${QUALITIES[@]}"; do
+      if [ "$Q" != "audio" ] && [ -f "${VIDEO_DIR}/${Q}p.m3u8" ]; then
+        # تعیین bandwidth تقریبی
+        BANDWIDTH=$((Q * 1000))
+        echo "#EXT-X-STREAM-INF:BANDWIDTH=${BANDWIDTH}000,RESOLUTION=1920x${Q}" >> "$MASTER_PLAYLIST"
+        echo "${Q}p.m3u8" >> "$MASTER_PLAYLIST"
+      fi
+    done
+    
+    # اضافه کردن audio در صورت وجود
+    if [ -f "${VIDEO_DIR}/audio.m3u8" ]; then
+      echo "#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"mp4a.40.2\"" >> "$MASTER_PLAYLIST"
+      echo "audio.m3u8" >> "$MASTER_PLAYLIST"
+    fi
+    
+    # ایجاد پلیر HTML ساده
+    PLAYER_HTML="${VIDEO_DIR}/player.html"
+    cat > "$PLAYER_HTML" << 'EOF'
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🎬 AVASAM HLS Player</title>
+    <link href="https://vjs.zencdn.net/7.20.3/video-js.css" rel="stylesheet">
+    <style>
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            margin: 0;
+            padding: 20px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .container {
+            max-width: 1200px;
+            width: 100%;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            overflow: hidden;
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            margin: -20px -20px 20px -20px;
+        }
+        .header h1 {
+            margin: 0;
+            font-size: 1.8em;
+        }
+        .header p {
+            margin: 10px 0 0;
+            opacity: 0.9;
+        }
+        .video-container {
+            border-radius: 10px;
+            overflow: hidden;
+            background: #000;
+        }
+        .quality-selector {
+            margin-top: 20px;
+            text-align: center;
+        }
+        .quality-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            margin: 5px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 14px;
+        }
+        .quality-btn:hover {
+            background: #764ba2;
+            transform: translateY(-2px);
+        }
+        .quality-btn.active {
+            background: #4CAF50;
+            box-shadow: 0 4px 15px rgba(76,175,80,0.3);
+        }
+        .info {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f5f5f5;
+            border-radius: 10px;
+            text-align: center;
+            font-size: 14px;
+            color: #666;
+        }
+        .badge {
+            display: inline-block;
+            background: #4CAF50;
+            color: white;
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            margin: 5px;
+        }
+    </style>
+</head>
+<body>
+<div class="container">
+    <div class="header">
+        <h1>🎬 AVASAM HLS Video Player</h1>
+        <p>Stream directly from GitHub • No download needed</p>
+    </div>
+    
+    <div class="video-container">
+        <video id="my-video" class="video-js vjs-big-play-centered vjs-16-9" controls preload="auto" width="100%" height="auto">
+            <p class="vjs-no-js">To view this video please enable JavaScript.</p>
+        </video>
+    </div>
+    
+    <div class="quality-selector" id="quality-selector"></div>
+    
+    <div class="info">
+        <span class="badge">⚡ HLS Streaming</span>
+        <span class="badge">🎥 Adaptive Bitrate</span>
+        <span class="badge">📱 Mobile Ready</span>
+        <p style="margin-top: 10px;">🌐 <strong>AVASAM</strong> - YouTube Downloader | <a href="https://avasam.ir" target="_blank">https://avasam.ir</a></p>
+    </div>
+</div>
 
-on:
-  workflow_dispatch:
-    inputs:
-      youtube_url:
-        description: "YouTube video link"
-        required: true
+<script src="https://vjs.zencdn.net/7.20.3/video.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/videojs-contrib-hls@5.15.0/dist/videojs-contrib-hls.min.js"></script>
+<script>
+    // لیست کیفیت‌های موجود (از سرور پر می‌شه)
+    const qualities = {};
+    
+    // دریافت کیفیت‌های موجود
+    fetch('master.m3u8')
+        .then(response => response.text())
+        .then(data => {
+            const lines = data.split('\\n');
+            for(let i = 0; i < lines.length; i++) {
+                if(lines[i].includes('RESOLUTION')) {
+                    const resolution = lines[i].match(/RESOLUTION=\\d+x(\\d+)/)[1];
+                    const url = lines[i+1];
+                    qualities[resolution+'p'] = url;
+                }
+            }
+            
+            // ساخت دکمه‌های کیفیت
+            const selector = document.getElementById('quality-selector');
+            for(const [quality, url] of Object.entries(qualities)) {
+                const btn = document.createElement('button');
+                btn.textContent = quality;
+                btn.className = 'quality-btn';
+                btn.onclick = () => {
+                    document.querySelectorAll('.quality-btn').forEach(b => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    player.src({src: url, type: 'application/x-mpegURL'});
+                    player.play();
+                };
+                selector.appendChild(btn);
+            }
+            
+            // انتخاب کیفیت اول به عنوان پیش‌فرض
+            if(selector.children.length > 0) {
+                selector.children[0].click();
+            }
+        });
+    
+    var player = videojs('my-video', {
+        html5: {
+            hls: {
+                enableLowInitialPlaylist: true,
+                smoothQualityChange: true
+            }
+        }
+    });
+</script>
+</body>
+</html>
+EOF
+    
+    # جایگزینی عنوان در HTML
+    sed -i "s|AVASAM HLS Video Player|🎬 ${VIDEO_TITLE} - AVASAM HLS Player|g" "$PLAYER_HTML"
+    
+    # نمایش خلاصه
+    echo ""
+    echo "══════════════════════════════════════════════════════"
+    echo "✅ HLS conversion complete!"
+    echo ""
+    echo "📁 Output structure:"
+    echo "   ${VIDEO_DIR}/"
+    echo "   ├── master.m3u8"
+    echo "   ├── player.html"
+    ls -la "${VIDEO_DIR}"/*.m3u8 2>/dev/null
+    echo "   └── segments/"
+    for Q in "${QUALITIES[@]}"; do
+      if [ "$Q" != "audio" ] && [ -d "${SEGMENTS_DIR}/${Q}p" ]; then
+        COUNT=$(ls "${SEGMENTS_DIR}/${Q}p"/*.ts 2>/dev/null | wc -l)
+        echo "       └── ${Q}p/ (${COUNT} segments)"
+      fi
+    done
+    echo "══════════════════════════════════════════════════════"
+    
+    # پاکسازی فایل‌های تمپ
+    rm -f tmp_*.mp4
 
-jobs:
-  convert:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+- name: Stop WARP Container
+  if: always()
+  run: |
+    docker stop warp || true
+    docker rm warp || true
 
-    steps:
-      # -------------------------------------------------
-      # Step 1. Checkout repo
-      # -------------------------------------------------
-      - name: Checkout Repository
-        uses: actions/checkout@v4
+- name: Generate Download Report
+  run: |
+    # پیدا کردن پوشه ویدئو
+    VIDEO_DIR=$(find videos -type d -mindepth 1 -maxdepth 1 | head -1)
+    VIDEO_NAME=$(basename "$VIDEO_DIR")
+    REPO_OWNER="${{ github.repository_owner }}"
+    REPO_NAME="${{ github.event.repository.name }}"
+    BRANCH="${GITHUB_REF_NAME}"
+    
+    # لینک پلیر
+    PLAYER_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}/${VIDEO_DIR}/player.html"
+    
+    # ذخیره لینک در GitHub Summary
+    echo "## 🎬 Download Complete!" >> $GITHUB_STEP_SUMMARY
+    echo "" >> $GITHUB_STEP_SUMMARY
+    echo "**Video:** ${VIDEO_NAME}" >> $GITHUB_STEP_SUMMARY
+    echo "**Watch Online:** [Click here to play](${PLAYER_URL})" >> $GITHUB_STEP_SUMMARY
+    echo "" >> $GITHUB_STEP_SUMMARY
+    echo "### 📁 Files structure:" >> $GITHUB_STEP_SUMMARY
+    echo '```' >> $GITHUB_STEP_SUMMARY
+    find "$VIDEO_DIR" -type f -name "*.ts" -o -name "*.m3u8" -o -name "*.html" | head -20 >> $GITHUB_STEP_SUMMARY
+    echo '```' >> $GITHUB_STEP_SUMMARY
+    
+    echo "🎉 Player URL: $PLAYER_URL"
 
-      # -------------------------------------------------
-      # Step 2. Enable Docker (safe method)
-      # -------------------------------------------------
-      - name: Setup Docker
-        uses: docker/setup-buildx-action@v3
-
-      # -------------------------------------------------
-      # Step 3. Install tools
-      # -------------------------------------------------
-      - name: Install Dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y ffmpeg python3-pip curl
-          pip3 install -U yt-dlp
-
-      # -------------------------------------------------
-      # Step 4. Login to GHCR (for WARP image access)
-      # -------------------------------------------------
-      - name: Login to GHCR
-        run: |
-          echo "${{ secrets.GITHUB_TOKEN }}" | \
-          docker login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      # -------------------------------------------------
-      # Step 5. Start WARP proxy container
-      # -------------------------------------------------
-      - name: Start Cloudflare WARP Proxy
-        id: warp
-        run: |
-          docker run -d \
-            --name warp \
-            -p 1080:1080 \
-            ghcr.io/virb3/wgcf:latest
-
-          echo "Waiting for WARP proxy to be ready..."
-          sleep 12
-
-          if docker ps | grep warp; then
-            echo "warp_status=running" >> $GITHUB_OUTPUT
-          else
-            echo "warp_status=failed" >> $GITHUB_OUTPUT
-          fi
-
-      # -------------------------------------------------
-      # Step 6. Download video (standard logic from your code)
-      # -------------------------------------------------
-      - name: Download YouTube Video (via WARP)
-        id: download
-        continue-on-error: true
-        run: |
-          mkdir input
-          echo "Downloading using SOCKS5 proxy..."
-          yt-dlp \
-            --proxy socks5://127.0.0.1:1080 \
-            -f "bv*+ba/best" \
-            --merge-output-format mp4 \
-            --retries 5 \
-            --fragment-retries 5 \
-            "${{ github.event.inputs.youtube_url }}" \
-            -o "input/video.%(ext)s"
-
-      # Fallback Download without proxy (if WARP fails)
-      - name: Retry Without Proxy if WARP fails
-        if: steps.download.outcome == 'failure'
-        run: |
-          echo "WARP download failed, retrying without proxy..."
-          yt-dlp \
-            -f "bv*+ba/best" \
-            --merge-output-format mp4 \
-            --retries 5 \
-            "${{ github.event.inputs.youtube_url }}" \
-            -o "input/video.%(ext)s"
-
-      # -------------------------------------------------
-      # Step 7. Convert to Adaptive Multi-quality HLS
-      # -------------------------------------------------
-      - name: Convert to HLS (1080p / 720p / 480p)
-        run: |
-          mkdir -p hls
-          INPUT=$(ls input/video.* | head -n 1)
-          
-          ffmpeg -i "$INPUT" \
-            -filter_complex \
-            "[0:v]split=3[v1][v2][v3]; \
-             [v1]scale=w=1920:h=1080[v1out]; \
-             [v2]scale=w=1280:h=720[v2out]; \
-             [v3]scale=w=854:h=480[v3out]" \
-            -map "[v1out]" -map 0:a \
-            -map "[v2out]" -map 0:a \
-            -map "[v3out]" -map 0:a \
-            -c:v libx264 -preset veryfast -crf 23 \
-            -c:a aac -ar 48000 -b:a 128k \
-            -f hls -hls_time 6 -hls_playlist_type vod \
-            -hls_flags independent_segments \
-            -hls_segment_filename "hls/v%v/segment_%03d.ts" \
-            -master_pl_name master.m3u8 \
-            -var_stream_map "v:0,a:0 v:1,a:1 v:2,a:2" \
-            hls/v%v/playlist.m3u8
-
-      # -------------------------------------------------
-      # Step 8. Generate simple HLS player page (same logic)
-      # -------------------------------------------------
-      - name: Generate HTML Player
-        run: |
-          cat <<'EOF' > hls/player.html
-          <!DOCTYPE html>
-          <html lang="en">
-          <head>
-            <meta charset="utf-8">
-            <title>Adaptive HLS Player</title>
-            <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-            <style>
-              body{background:#111;color:#fff;text-align:center;margin-top:50px;}
-              video{width:80%;border:2px solid #333;}
-            </style>
-          </head>
-          <body>
-            <h2>Adaptive HLS Stream</h2>
-            <video id="video" controls></video>
-            <script>
-              const video = document.getElementById('video');
-              const src = 'master.m3u8';
-              if(Hls.isSupported()){
-                const hls=new Hls();
-                hls.loadSource(src);
-                hls.attachMedia(video);
-              }else if(video.canPlayType('application/vnd.apple.mpegurl')){
-                video.src=src;
-              }
-            </script>
-          </body>
-          </html>
-          EOF
-
-      # -------------------------------------------------
-      # Step 9. Commit and push HLS output
-      # -------------------------------------------------
-      - name: Commit HLS Output
-        run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-
-          mkdir -p videos
-          cp -r hls/* videos/
-
-          git add videos
-          git commit -m "Add adaptive HLS stream" || echo "No changes to commit"
-          git push
+- name: Commit & Push
+  run: |
+    git config user.name "github-actions"
+    git config user.email "github-actions@github.com"
+    
+    # افزودن تدریجی فایل‌ها
+    find videos -type f -name "*.ts" -o -name "*.m3u8" -o -name "*.html" | while read file; do
+      git add "$file"
+      
+      # هر ۵۰ فایل یک commit بزن
+      COUNT=$(git diff --cached --name-only | wc -l)
+      if [ "$COUNT" -ge 50 ]; then
+        git commit -m "[AVASAM] Add HLS segments batch [skip ci]" || true
+        git pull --rebase origin "$BRANCH" || true
+        git push origin HEAD:"$BRANCH" || true
+      fi
+    done
+    
+    # commit نهایی
+    git commit -m "[AVASAM] Complete HLS video: ${VIDEO_NAME} [skip ci]" || true
+    git pull --rebase origin "$BRANCH" || true
+    git push origin HEAD:"$BRANCH"
+    
+    echo "✅ All HLS files pushed successfully!"
