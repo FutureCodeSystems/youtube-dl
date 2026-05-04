@@ -1,4 +1,4 @@
-name: 01- 🎬 Youtube Downloader (HLS Stream)
+name: 01- 🎬 Youtube Downloader
 
 on:
   workflow_dispatch:
@@ -12,14 +12,6 @@ on:
         required: false
         default: 'best'
         type: string
-      hls_mode:
-        description: 'Upload as HLS stream? (yes/no)'
-        required: false
-        default: 'yes'
-        type: choice
-        options:
-          - 'yes'
-          - 'no'
 
 jobs:
   download-youtube:
@@ -47,15 +39,27 @@ jobs:
             --sysctl net.ipv4.conf.all.src_valid_mark=1 \
             -v warp-data:/var/lib/cloudflare-warp \
             caomingjun/warp
-          echo "⏳ Waiting for WARP to initialize..."
+          echo "⏳ Waiting for WARP to initialize (30 seconds)..."
           sleep 30
+          echo "🔍 Checking WARP status..."
           for i in {1..10}; do
-            if curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace | grep -qE "warp=(on|plus)"; then
+            RESULT=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
+            if echo "$RESULT" | grep -qE "warp=(on|plus)"; then
               echo "✅ WARP is active!"
+              echo "$RESULT"
               break
+            else
+              echo "⏳ Attempt $i/10 - WARP not ready yet, waiting..."
+              sleep 10
             fi
-            sleep 10
           done
+          FINAL=$(curl -s --max-time 10 --socks5-hostname 127.0.0.1:1080 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo "failed")
+          if echo "$FINAL" | grep -qE "warp=(on|plus)"; then
+            echo "✅ WARP proxy is ready!"
+          else
+            echo "⚠️ WARP might not be fully active, but continuing anyway..."
+            echo "Response: $FINAL"
+          fi
 
       - name: Install Dependencies
         run: |
@@ -67,345 +71,256 @@ jobs:
         run: |
           URL="${{ github.event.inputs.youtube_url }}"
           QUALITY="${{ github.event.inputs.quality }}"
-          HLS_MODE="${{ github.event.inputs.hls_mode }}"
           
           mkdir -p videos
           
-          echo "🏷️  AVASAM YouTube Downloader (HLS Support)"
+          echo "🏷️  AVASAM HLS YouTube Downloader"
           echo "🌐 https://avasam.ir"
+          echo ""
+          echo "📹 Downloading: $URL"
           
-          # Download video using yt-dlp
-          echo "📥 Downloading video..."
-          yt-dlp \
-            --proxy "socks5://127.0.0.1:1080" \
-            --format "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best" \
-            --merge-output-format mp4 \
-            --output "video.mp4" \
-            --no-playlist \
-            --retries 10 \
-            "$URL"
+          VIDEO_TITLE=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-title --no-playlist "$URL" 2>/dev/null | sed 's/[^a-zA-Z0-9\-_]/_/g')
+          VIDEO_ID=$(yt-dlp --proxy "socks5://127.0.0.1:1080" --get-id "$URL" 2>/dev/null)
           
-          if [ ! -f "video.mp4" ]; then
-            echo "❌ Download failed!"
-            exit 1
+          if [ -z "$VIDEO_TITLE" ]; then
+            VIDEO_TITLE="video_${VIDEO_ID}"
           fi
           
-          VIDEO_SIZE=$(stat -c%s "video.mp4")
-          VIDEO_SIZE_MB=$(echo "scale=2; $VIDEO_SIZE / 1024 / 1024" | bc)
-          echo "✅ Downloaded: $VIDEO_SIZE_MB MB"
+          VIDEO_DIR="videos/${VIDEO_TITLE}"
+          SEGMENTS_DIR="${VIDEO_DIR}/segments"
+          mkdir -p "$SEGMENTS_DIR"
           
-          if [ "$HLS_MODE" = "yes" ]; then
-            echo "🎬 Converting to HLS format..."
-            
-            # Get video info
-            DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 video.mp4)
-            DURATION_SEC=$(printf "%.0f" "$DURATION")
-            
-            # Calculate segment duration (aim for ~10MB per segment)
-            # Each TS segment should be under 100MB, aiming for ~10MB is safer
-            TARGET_SEGMENT_SIZE_MB=10
-            ESTIMATED_SEGMENTS=$(( (VIDEO_SIZE_MB / TARGET_SEGMENT_SIZE_MB) + 1 ))
-            SEGMENT_DURATION=$(( DURATION_SEC / ESTIMATED_SEGMENTS ))
-            
-            # Ensure segment duration is between 4 and 15 seconds
-            if [ "$SEGMENT_DURATION" -lt 4 ]; then
-              SEGMENT_DURATION=4
-            elif [ "$SEGMENT_DURATION" -gt 15 ]; then
-              SEGMENT_DURATION=15
+          echo "📁 Video title: $VIDEO_TITLE"
+          echo "🎯 Quality: $QUALITY"
+          
+          declare -a QUALITIES=()
+          case "$QUALITY" in
+            "best")
+              QUALITIES=("1080" "720" "480")
+              ;;
+            "1080")
+              QUALITIES=("1080")
+              ;;
+            "720")
+              QUALITIES=("720")
+              ;;
+            "480")
+              QUALITIES=("480")
+              ;;
+            "audio")
+              QUALITIES=("audio")
+              ;;
+          esac
+          
+          for Q in "${QUALITIES[@]}"; do
+            if [ "$Q" == "audio" ]; then
+              echo "🎵 Downloading audio only..."
+              yt-dlp \
+                --proxy "socks5://127.0.0.1:1080" \
+                --format "bestaudio" \
+                --extract-audio \
+                --audio-format m4a \
+                --output "${SEGMENTS_DIR}/audio.m4a" \
+                --no-playlist \
+                "$URL" || continue
+              
+              printf '#EXTM3U\n' > "${VIDEO_DIR}/audio.m3u8"
+              printf '#EXT-X-VERSION:3\n' >> "${VIDEO_DIR}/audio.m3u8"
+              printf '#EXT-X-ALLOW-CACHE:YES\n' >> "${VIDEO_DIR}/audio.m3u8"
+              printf '#EXT-X-TARGETDURATION:10\n' >> "${VIDEO_DIR}/audio.m3u8"
+              printf '#EXT-X-MEDIA-SEQUENCE:0\n' >> "${VIDEO_DIR}/audio.m3u8"
+              printf '#EXTINF:10.0,\n' >> "${VIDEO_DIR}/audio.m3u8"
+              printf 'segments/audio.m4a\n' >> "${VIDEO_DIR}/audio.m3u8"
+              printf '#EXT-X-ENDLIST\n' >> "${VIDEO_DIR}/audio.m3u8"
+              
+              echo "✅ Audio downloaded"
+              continue
             fi
             
-            echo "📊 Video duration: ${DURATION_SEC}s"
-            echo "📦 Segment duration: ${SEGMENT_DURATION}s"
+            echo "🎬 Processing quality: ${Q}p"
+            TEMP_VIDEO="tmp_${Q}.mp4"
             
-            # Create HLS structure with subdirectories (v0, v1, v2...)
-            # Each subdirectory will contain a portion of segments for better organization
-            SEGMENTS_PER_FOLDER=50
+            yt-dlp \
+              --proxy "socks5://127.0.0.1:1080" \
+              --format "bestvideo[height<=${Q}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${Q}][ext=mp4]/best" \
+              --merge-output-format mp4 \
+              --output "$TEMP_VIDEO" \
+              --no-playlist \
+              "$URL" || continue
             
-            # Create master playlist
-            cat > videos/master.m3u8 << EOF
-#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080
-stream.m3u8
-EOF
+            if [ ! -f "$TEMP_VIDEO" ]; then
+              echo "⚠️ Quality ${Q}p not available, skipping..."
+              continue
+            fi
             
-            # Convert to HLS segments (store in temp)
-            ffmpeg -i video.mp4 \
-              -c:v libx264 -preset fast -crf 23 \
+            mkdir -p "${SEGMENTS_DIR}/${Q}p"
+            
+            ffmpeg -i "$TEMP_VIDEO" \
+              -c:v libx264 -crf 23 -preset medium \
               -c:a aac -b:a 128k \
               -f hls \
-              -hls_time $SEGMENT_DURATION \
+              -hls_time 10 \
               -hls_list_size 0 \
-              -hls_segment_filename "videos/v%d/segment_%03d.ts" \
-              -hls_base_url "./" \
-              videos/stream.m3u8
+              -hls_segment_filename "${SEGMENTS_DIR}/${Q}p/segment_%03d.ts" \
+              -hls_flags independent_segments \
+              "${VIDEO_DIR}/${Q}p.m3u8" 2>/dev/null
             
-            # Rename folders to v0, v1, v2...
-            cd videos
-            folder_counter=0
-            for folder in v*; do
-              if [ -d "$folder" ] && [[ "$folder" =~ ^v[0-9]+$ ]]; then
-                mv "$folder" "temp_$folder"
-              fi
-            done
+            sed -i "s|${Q}p/segment_|segments/${Q}p/segment_|g" "${VIDEO_DIR}/${Q}p.m3u8"
+            rm -f "$TEMP_VIDEO"
             
-            # Reorganize
-            ts_files=()
-            for ts in v*/segment_*.ts; do
-              if [ -f "$ts" ]; then
-                ts_files+=("$ts")
-              fi
-            done
-            
-            # Sort and distribute
-            mkdir -p v0 v1 v2 v3 v4 v5
-            folder_idx=0
-            for i in "${!ts_files[@]}"; do
-              target_folder="v$((folder_idx))"
-              mv "${ts_files[$i]}" "${target_folder}/segment_$(printf "%03d" $i).ts"
-              if [ $(( (i + 1) % SEGMENTS_PER_FOLDER )) -eq 0 ]; then
-                folder_idx=$((folder_idx + 1))
-                mkdir -p "v$folder_idx"
-              fi
-            done
-            
-            # Update playlist with correct segment paths
-            cat > stream.m3u8 << EOF
-#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-TARGETDURATION:$SEGMENT_DURATION
-#EXT-X-MEDIA-SEQUENCE:0
-EOF
-            
-            # Add each segment to playlist
-            for folder in v*/; do
-              for segment in ${folder}segment_*.ts; do
-                if [ -f "$segment" ]; then
-                  DUR_CHECK=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$segment" 2>/dev/null || echo "$SEGMENT_DURATION")
-                  printf "#EXTINF:%.3f,\n%s\n" "$DUR_CHECK" "$segment" >> stream.m3u8
-                fi
-              done
-            done
-            
-            # Create HTML5 video player
-            cat > player.html << 'EOF'
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-    <title>AVASAM HLS Video Player</title>
-    <link href="https://vjs.zencdn.net/7.20.3/video-js.css" rel="stylesheet">
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        body {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-        .container {
-            max-width: 1200px;
-            width: 100%;
-            background: rgba(255,255,255,0.95);
-            border-radius: 20px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            overflow: hidden;
-            animation: fadeIn 0.5s ease;
-        }
-        @keyframes fadeIn {
-            from { opacity: 0; transform: translateY(20px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        .header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            padding: 20px 30px;
-            text-align: center;
-        }
-        .header h1 {
-            font-size: 1.8em;
-            margin-bottom: 5px;
-        }
-        .header p {
-            opacity: 0.9;
-            font-size: 0.9em;
-        }
-        .video-container {
-            padding: 20px;
-            background: #000;
-        }
-        .video-js {
-            width: 100%;
-            height: auto;
-            aspect-ratio: 16/9;
-        }
-        .info {
-            padding: 20px 30px;
-            background: #f8f9fa;
-            border-top: 1px solid #dee2e6;
-        }
-        .info h3 {
-            color: #495057;
-            margin-bottom: 10px;
-        }
-        .info p {
-            color: #6c757d;
-            line-height: 1.6;
-        }
-        .footer {
-            background: #343a40;
-            color: #adb5bd;
-            padding: 15px 30px;
-            text-align: center;
-            font-size: 0.85em;
-        }
-        .footer a {
-            color: #80bdff;
-            text-decoration: none;
-        }
-        .download-btn {
-            display: inline-block;
-            background: #28a745;
-            color: white;
-            padding: 10px 20px;
-            border-radius: 5px;
-            text-decoration: none;
-            margin-top: 10px;
-            transition: background 0.3s;
-        }
-        .download-btn:hover {
-            background: #218838;
-        }
-        @media (max-width: 768px) {
-            .header h1 { font-size: 1.3em; }
-            .info { padding: 15px 20px; }
-        }
-    </style>
-</head>
-<body>
-<div class="container">
-    <div class="header">
-        <h1>🎬 AVASAM HLS Video Player</h1>
-        <p>High Quality Streaming | Direct Download Available</p>
-    </div>
-    <div class="video-container">
-        <video id="my-video" class="video-js vjs-big-play-centered" controls preload="auto" width="100%" height="auto" data-setup='{}'>
-            <source src="stream.m3u8" type="application/x-mpegURL">
-            <p class="vjs-no-js">To view this video please enable JavaScript.</p>
-        </video>
-    </div>
-    <div class="info">
-        <h3>📹 Video Information</h3>
-        <p><strong>Format:</strong> HLS Streaming (HTTP Live Streaming)</p>
-        <p><strong>Quality:</strong> Adaptive Bitrate (1080p)</p>
-        <p><strong>How to watch:</strong> Video streams directly in your browser. You can also download segments manually.</p>
-        <a href="#" id="directLink" class="download-btn">💾 Download Original Video</a>
-    </div>
-    <div class="footer">
-        <p>Powered by <a href="https://avasam.ir" target="_blank">AVASAM</a> | Hosted on GitHub</p>
-    </div>
-</div>
-<script src="https://vjs.zencdn.net/7.20.3/video.min.js"></script>
-<script>
-    var player = videojs('my-video', {
-        controlBar: {
-            pictureInPictureToggle: true,
-            currentTimeDisplay: true,
-            timeDivider: true,
-            durationDisplay: true,
-            progressControl: true
-        }
-    });
-    
-    // Try to get original video (if exists)
-    fetch('original_video.txt').then(r => r.text()).then(url => {
-        if(url && url !== '') {
-            document.getElementById('directLink').href = url;
-        }
-    }).catch(() => {});
-</script>
-</body>
-</html>
-EOF
-            
-            # Create info file
-            REPO_OWNER="${{ github.repository_owner }}"
-            REPO_NAME="${{ github.event.repository.name }}"
-            BRANCH="${GITHUB_REF_NAME}"
-            PLAYER_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}/videos/player.html"
-            
-            cat > INFO.txt << EOF
-╔══════════════════════════════════════════════════════════════════╗
-║                    🎬 AVASAM YouTube Downloader                   ║
-║                       https://avasam.ir                           ║
-╚══════════════════════════════════════════════════════════════════╝
-
-📹 VIDEO INFORMATION
-═══════════════════════════════════════════════════════════════════
-
-1️⃣  Video Name
-    $(basename "$URL")
-
-2️⃣  Original YouTube Link
-    ${URL}
-
-3️⃣  Format
-    🎬 HLS Streaming (segmented TS files)
-
-4️⃣  Watch Online
-    🌐 ${PLAYER_URL}
-
-5️⃣  Structure
-    videos/
-    ├── master.m3u8 (Master playlist)
-    ├── stream.m3u8 (Stream playlist)  
-    ├── player.html (HTML5 player)
-    ├── v0/segment_000.ts, segment_001.ts...
-    ├── v1/segment_000.ts, segment_001.ts...
-    └── ...
-
-═══════════════════════════════════════════════════════════════════
-                    🏷️ Generated by AVASAM
-                      https://avasam.ir
-═══════════════════════════════════════════════════════════════════
-EOF
-            
-            echo "✅ HLS conversion complete!"
-            echo "📁 Structure: videos/v0/, videos/v1/, ..."
-            echo "🌐 Player URL: ${PLAYER_URL}"
-            
-          else
-            # Original method (zip split)
-            echo "📦 Using original split method..."
-            SPLIT_MB=90
-            # ... (your existing split code here)
+            TOTAL_SIZE=$(du -sh "${SEGMENTS_DIR}/${Q}p" 2>/dev/null | cut -f1)
+            echo "✅ ${Q}p: Converted to $(ls ${SEGMENTS_DIR}/${Q}p/*.ts 2>/dev/null | wc -l) segments (~${TOTAL_SIZE})"
+          done
+          
+          MASTER_PLAYLIST="${VIDEO_DIR}/master.m3u8"
+          printf '#EXTM3U\n' > "$MASTER_PLAYLIST"
+          printf '#EXT-X-VERSION:3\n' >> "$MASTER_PLAYLIST"
+          
+          for Q in "${QUALITIES[@]}"; do
+            if [ "$Q" != "audio" ] && [ -f "${VIDEO_DIR}/${Q}p.m3u8" ]; then
+              BANDWIDTH=$((Q * 1000))
+              printf '#EXT-X-STREAM-INF:BANDWIDTH=%d000,RESOLUTION=1920x%s\n' "$BANDWIDTH" "$Q" >> "$MASTER_PLAYLIST"
+              printf '%sp.m3u8\n' "$Q" >> "$MASTER_PLAYLIST"
+            fi
+          done
+          
+          if [ -f "${VIDEO_DIR}/audio.m3u8" ]; then
+            printf '#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS="mp4a.40.2"\n' >> "$MASTER_PLAYLIST"
+            printf 'audio.m3u8\n' >> "$MASTER_PLAYLIST"
           fi
+          
+          # ساخت پلیر HTML با استفاده از echo به جای cat
+          PLAYER_HTML="${VIDEO_DIR}/player.html"
+          
+          echo '<!DOCTYPE html>' > "$PLAYER_HTML"
+          echo '<html>' >> "$PLAYER_HTML"
+          echo '<head>' >> "$PLAYER_HTML"
+          echo '<meta charset="UTF-8">' >> "$PLAYER_HTML"
+          echo '<meta name="viewport" content="width=device-width,initial-scale=1.0">' >> "$PLAYER_HTML"
+          echo '<title>🎬 AVASAM HLS Player</title>' >> "$PLAYER_HTML"
+          echo '<link href="https://vjs.zencdn.net/7.20.3/video-js.css" rel="stylesheet">' >> "$PLAYER_HTML"
+          echo '<style>' >> "$PLAYER_HTML"
+          echo 'body{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);margin:0;padding:20px;font-family:"Segoe UI",Tahoma,Geneva,Verdana,sans-serif;min-height:100vh;display:flex;justify-content:center;align-items:center}' >> "$PLAYER_HTML"
+          echo '.container{max-width:1200px;width:100%;background:white;border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.3);overflow:hidden;padding:20px}' >> "$PLAYER_HTML"
+          echo '.header{text-align:center;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;margin:-20px -20px 20px -20px}' >> "$PLAYER_HTML"
+          echo '.header h1{margin:0;font-size:1.8em}' >> "$PLAYER_HTML"
+          echo '.header p{margin:10px 0 0;opacity:0.9}' >> "$PLAYER_HTML"
+          echo '.video-container{border-radius:10px;overflow:hidden;background:#000}' >> "$PLAYER_HTML"
+          echo '.quality-selector{margin-top:20px;text-align:center}' >> "$PLAYER_HTML"
+          echo '.quality-btn{background:#667eea;color:white;border:none;padding:10px 20px;margin:5px;border-radius:8px;cursor:pointer;transition:all 0.3s;font-size:14px}' >> "$PLAYER_HTML"
+          echo '.quality-btn:hover{background:#764ba2;transform:translateY(-2px)}' >> "$PLAYER_HTML"
+          echo '.quality-btn.active{background:#4CAF50;box-shadow:0 4px 15px rgba(76,175,80,0.3)}' >> "$PLAYER_HTML"
+          echo '.info{margin-top:20px;padding:15px;background:#f5f5f5;border-radius:10px;text-align:center;font-size:14px;color:#666}' >> "$PLAYER_HTML"
+          echo '.badge{display:inline-block;background:#4CAF50;color:white;padding:5px 10px;border-radius:20px;font-size:12px;margin:5px}' >> "$PLAYER_HTML"
+          echo '</style>' >> "$PLAYER_HTML"
+          echo '</head>' >> "$PLAYER_HTML"
+          echo '<body>' >> "$PLAYER_HTML"
+          echo '<div class="container">' >> "$PLAYER_HTML"
+          echo '<div class="header">' >> "$PLAYER_HTML"
+          echo '<h1>🎬 AVASAM HLS Video Player</h1>' >> "$PLAYER_HTML"
+          echo '<p>Stream directly from GitHub • No download needed</p>' >> "$PLAYER_HTML"
+          echo '</div>' >> "$PLAYER_HTML"
+          echo '<div class="video-container">' >> "$PLAYER_HTML"
+          echo '<video id="my-video" class="video-js vjs-big-play-centered vjs-16-9" controls preload="auto" width="100%" height="auto">' >> "$PLAYER_HTML"
+          echo '<p class="vjs-no-js">To view this video please enable JavaScript.</p>' >> "$PLAYER_HTML"
+          echo '</video>' >> "$PLAYER_HTML"
+          echo '</div>' >> "$PLAYER_HTML"
+          echo '<div class="quality-selector" id="quality-selector"></div>' >> "$PLAYER_HTML"
+          echo '<div class="info">' >> "$PLAYER_HTML"
+          echo '<span class="badge">⚡ HLS Streaming</span>' >> "$PLAYER_HTML"
+          echo '<span class="badge">🎥 Adaptive Bitrate</span>' >> "$PLAYER_HTML"
+          echo '<span class="badge">📱 Mobile Ready</span>' >> "$PLAYER_HTML"
+          echo '<p style="margin-top:10px">🌐 <strong>AVASAM</strong> - YouTube Downloader | <a href="https://avasam.ir" target="_blank">https://avasam.ir</a></p>' >> "$PLAYER_HTML"
+          echo '</div>' >> "$PLAYER_HTML"
+          echo '</div>' >> "$PLAYER_HTML"
+          echo '<script src="https://vjs.zencdn.net/7.20.3/video.min.js"></script>' >> "$PLAYER_HTML"
+          echo '<script src="https://cdn.jsdelivr.net/npm/videojs-contrib-hls@5.15.0/dist/videojs-contrib-hls.min.js"></script>' >> "$PLAYER_HTML"
+          echo '<script>' >> "$PLAYER_HTML"
+          echo 'var qualities={};' >> "$PLAYER_HTML"
+          echo 'fetch("master.m3u8").then(function(response){return response.text();}).then(function(data){' >> "$PLAYER_HTML"
+          echo 'var lines=data.split("\n");' >> "$PLAYER_HTML"
+          echo 'for(var i=0;i<lines.length;i++){' >> "$PLAYER_HTML"
+          echo 'if(lines[i].includes("RESOLUTION")){' >> "$PLAYER_HTML"
+          echo 'var resolution=lines[i].match(/RESOLUTION=\d+x(\d+)/)[1];' >> "$PLAYER_HTML"
+          echo 'var url=lines[i+1];' >> "$PLAYER_HTML"
+          echo 'qualities[resolution+"p"]=url;' >> "$PLAYER_HTML"
+          echo '}' >> "$PLAYER_HTML"
+          echo '}' >> "$PLAYER_HTML"
+          echo 'var selector=document.getElementById("quality-selector");' >> "$PLAYER_HTML"
+          echo 'for(var q in qualities){' >> "$PLAYER_HTML"
+          echo 'if(qualities.hasOwnProperty(q)){' >> "$PLAYER_HTML"
+          echo 'var btn=document.createElement("button");' >> "$PLAYER_HTML"
+          echo 'btn.textContent=q;' >> "$PLAYER_HTML"
+          echo 'btn.className="quality-btn";' >> "$PLAYER_HTML"
+          echo 'btn.onclick=function(quality,url){' >> "$PLAYER_HTML"
+          echo 'return function(){' >> "$PLAYER_HTML"
+          echo 'document.querySelectorAll(".quality-btn").forEach(function(b){b.classList.remove("active");});' >> "$PLAYER_HTML"
+          echo 'this.classList.add("active");' >> "$PLAYER_HTML"
+          echo 'player.src({src:url,type:"application/x-mpegURL"});' >> "$PLAYER_HTML"
+          echo 'player.play();' >> "$PLAYER_HTML"
+          echo '};' >> "$PLAYER_HTML"
+          echo '}(q,qualities[q]);' >> "$PLAYER_HTML"
+          echo 'selector.appendChild(btn);' >> "$PLAYER_HTML"
+          echo '}' >> "$PLAYER_HTML"
+          echo '}' >> "$PLAYER_HTML"
+          echo 'if(selector.children.length>0){selector.children[0].click();}' >> "$PLAYER_HTML"
+          echo '});' >> "$PLAYER_HTML"
+          echo 'var player=videojs("my-video",{html5:{hls:{enableLowInitialPlaylist:true,smoothQualityChange:true}}});' >> "$PLAYER_HTML"
+          echo '</script>' >> "$PLAYER_HTML"
+          echo '</body>' >> "$PLAYER_HTML"
+          echo '</html>' >> "$PLAYER_HTML"
+          
+          sed -i "s|AVASAM HLS Video Player|🎬 ${VIDEO_TITLE} - AVASAM HLS Player|g" "$PLAYER_HTML"
+          
+          echo ""
+          echo "══════════════════════════════════════════════════════"
+          echo "✅ HLS conversion complete!"
+          echo "📁 Output: ${VIDEO_DIR}/"
+          echo "══════════════════════════════════════════════════════"
+          
+          rm -f tmp_*.mp4
 
       - name: Stop WARP Container
         if: always()
-        run: docker stop warp || true; docker rm warp || true
+        run: |
+          docker stop warp || true
+          docker rm warp || true
+
+      - name: Generate Download Report
+        run: |
+          VIDEO_DIR=$(find videos -type d -mindepth 1 -maxdepth 1 | head -1)
+          VIDEO_NAME=$(basename "$VIDEO_DIR")
+          REPO_OWNER="${{ github.repository_owner }}"
+          REPO_NAME="${{ github.event.repository.name }}"
+          BRANCH="${GITHUB_REF_NAME}"
+          
+          PLAYER_URL="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${BRANCH}/${VIDEO_DIR}/player.html"
+          
+          echo "## 🎬 Download Complete!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Video:** ${VIDEO_NAME}" >> $GITHUB_STEP_SUMMARY
+          echo "**Watch Online:** [Click here to play](${PLAYER_URL})" >> $GITHUB_STEP_SUMMARY
+          
+          echo "🎉 Player URL: $PLAYER_URL"
 
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
           git config user.email "github-actions@github.com"
+          BRANCH="${GITHUB_REF_NAME}"
           
-          # Add all files
-          git add videos/
-          
-          # Commit
-          git commit -m "[AVASAM] HLS stream upload [skip ci]" || echo "No changes to commit"
-          
-          # Push with retry
-          for i in {1..3}; do
-            git pull --rebase origin ${GITHUB_REF_NAME} && git push origin HEAD:${GITHUB_REF_NAME} && break
-            sleep 5
+          find videos -type f \( -name "*.ts" -o -name "*.m3u8" -o -name "*.html" -o -name "*.m4a" \) | while read file; do
+            git add "$file"
+            COUNT=$(git diff --cached --name-only | wc -l)
+            if [ "$COUNT" -ge 50 ]; then
+              git commit -m "[AVASAM] Add HLS segments batch [skip ci]" || true
+              git pull --rebase origin "$BRANCH" || true
+              git push origin HEAD:"$BRANCH" || true
+            fi
           done
+          
+          git commit -m "[AVASAM] Complete HLS video [skip ci]" || true
+          git pull --rebase origin "$BRANCH" || true
+          git push origin HEAD:"$BRANCH"
+          
+          echo "✅ All HLS files pushed successfully!"
