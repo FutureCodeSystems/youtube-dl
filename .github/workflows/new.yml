@@ -14,30 +14,29 @@ jobs:
       contents: write
 
     steps:
-
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
+
+      - name: Set up Docker
+        uses: docker/setup-buildx-action@v3
 
       - name: Install tools
         run: |
           sudo apt update
-          sudo apt install -y ffmpeg python3-pip docker.io
+          sudo apt install -y ffmpeg python3-pip
           pip3 install -U yt-dlp
 
-      # اجرای WARP مثل کد اصلی تو
-      - name: Start WARP proxy
+      - name: Start WARP proxy (Cloudflare)
         run: |
           docker run -d \
           --name warp \
           -p 1080:1080 \
           ghcr.io/viRb3/wgcf-warp:latest
-
           sleep 10
 
       - name: Download video
         run: |
           mkdir input
-
           yt-dlp \
           --proxy socks5://127.0.0.1:1080 \
           -f "bestvideo+bestaudio/best" \
@@ -47,23 +46,16 @@ jobs:
       - name: Convert to HLS
         run: |
           mkdir -p hls
-
           ffmpeg -i input/video.* \
-          -codec copy \
-          -start_number 0 \
-          -hls_time 6 \
-          -hls_list_size 0 \
-          -f hls \
-          hls/playlist.m3u8
+          -codec copy -start_number 0 \
+          -hls_time 6 -hls_list_size 0 \
+          -f hls hls/playlist.m3u8
 
-      - name: Commit files
+      - name: Commit HLS output
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-
-          mkdir -p videos
-          cp -r hls/* videos/
-
+          mkdir -p videos && cp -r hls/* videos/
           git add videos
           git commit -m "Add HLS video"
           git push
