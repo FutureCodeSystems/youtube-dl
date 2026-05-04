@@ -75,7 +75,7 @@ jobs:
             *)      RESOLUTIONS=("720") ;;
           esac
           
-          # تابع دانلود مستقیم MP4 (بدون merge) و تبدیل سریع
+          # تابع دانلود مستقیم و تبدیل
           proc() {
             local res="$1"
             if [ "$res" = "audio" ]; then
@@ -88,15 +88,12 @@ jobs:
             fi
             
             echo "🎬 ${res}p downloading ..."
-            # مهم: انتخاب فرمتی که نیازی به merge ندارد (بهترین ویدئو + صدا در یک فایل)
-            # اولویت best با فرمت mp4 (که اکثراً آماده است)
             yt-dlp --proxy socks5://127.0.0.1:1080 \
               --format "best[height<=${res}][ext=mp4]/best[height<=${res}]" \
               -o "tmp_${res}.mp4" --no-playlist --no-mtime --concurrent-fragments 16 \
               --downloader aria2c --downloader-args "aria2c:-x 16 -s 16 -k 1M" \
               "$URL" >/dev/null 2>&1
             
-            # اگر فایل ساخته نشد (فرمت مستقیم نبود) از merge استفاده کن (کمتر اتفاق می‌افتد)
             if [ ! -f "tmp_${res}.mp4" ]; then
               echo "⚠️ ${res}p fallback to merge ..."
               yt-dlp --proxy socks5://127.0.0.1:1080 \
@@ -106,7 +103,6 @@ jobs:
             
             if [ -f "tmp_${res}.mp4" ]; then
               mkdir -p "$SEGMENTS_DIR/${res}p"
-              # تبدیل سریع HLS با ultrafast و سگمنت‌های ۶ ثانیه‌ای
               ffmpeg -i "tmp_${res}.mp4" \
                 -c:v libx264 -preset ultrafast -crf 28 \
                 -c:a aac -b:a 96k \
@@ -123,7 +119,6 @@ jobs:
             fi
           }
           
-          # اجرای موازی برای همه رزولوشن‌ها
           for r in "${RESOLUTIONS[@]}"; do
             proc "$r" &
           done
@@ -141,31 +136,39 @@ jobs:
           done
           [ -f "$VIDEO_DIR/audio.m3u8" ] && echo "#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"mp4a.40.2\"" >> "$MASTER" && echo "audio.m3u8" >> "$MASTER"
           
-          # پلیر ساده و مطمئن (با printf)
-          PLAYER="$VIDEO_DIR/player.html"
-          printf '<!DOCTYPE html>\n' > "$PLAYER"
-          printf '<html><head><meta charset="UTF-8"><title>🎬 AVASAM</title>\n' >> "$PLAYER"
-          printf '<link href="https://vjs.zencdn.net/8.10.0/video-js.min.css" rel="stylesheet">\n' >> "$PLAYER"
-          printf '<style>body{margin:0;background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh}.video-js{width:100%;height:auto;aspect-ratio:16/9}</style>\n' >> "$PLAYER"
-          printf '</head><body>\n' >> "$PLAYER"
-          printf '<video id="player" class="video-js vjs-big-play-centered" controls></video>\n' >> "$PLAYER"
-          printf '<script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>\n' >> "$PLAYER"
-          printf '<script>\n' >> "$PLAYER"
-          printf 'const id = window.location.pathname.match(/\\/videos\\/([^\\/]+)/)[1];\n' >> "$PLAYER"
-          printf 'const base = "https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/videos/"+id;\n' >> "$PLAYER"
-          printf 'fetch(base+"/master.m3u8").then(r=>r.text()).then(data=>{\n' >> "$PLAYER"
-          printf '  const q={};\n' >> "$PLAYER"
-          printf '  const lines=data.split("\\n");\n' >> "$PLAYER"
-          printf '  for(let i=0;i<lines.length;i++){\n' >> "$PLAYER"
-          printf '    if(lines[i].includes("RESOLUTION")){\n' >> "$PLAYER"
-          printf '      const m=lines[i].match(/RESOLUTION=\\d+x(\\d+)/);\n' >> "$PLAYER"
-          printf '      if(m){ const url=lines[i+1].trim(); q[m[1]]=url.startsWith("http")?url:base+"/"+url; }\n' >> "$PLAYER"
-          printf '    }\n' >> "$PLAYER"
-          printf '  }\n' >> "$PLAYER"
-          printf '  const best=Object.keys(q).sort((a,b)=>b-a)[0];\n' >> "$PLAYER"
-          printf '  videojs("player",{src:q[best],type:"application/x-mpegURL",html5:{hls:{enableLowInitialPlaylist:true}}});\n' >> "$PLAYER"
-          printf '});\n' >> "$PLAYER"
-          printf '</script></body></html>\n' >> "$PLAYER"
+          # ساخت پلیر HTML (با cat و جایگزینی بعدی)
+          cat > "$VIDEO_DIR/player.html" << 'PLAYEREOF'
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>🎬 AVASAM Player</title>
+<link href="https://vjs.zencdn.net/8.10.0/video-js.min.css" rel="stylesheet">
+<style>body{margin:0;background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh}.video-js{width:100%;height:auto;aspect-ratio:16/9}</style>
+</head><body>
+<video id="player" class="video-js vjs-big-play-centered" controls></video>
+<script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
+<script>
+const videoId = window.location.pathname.match(/\/videos\/([^\/]+)/)[1];
+const base = "RAW_BASE_PLACEHOLDER/videos/" + videoId;
+fetch(base+"/master.m3u8").then(r=>r.text()).then(data=>{
+  const qualities={};
+  const lines=data.split("\n");
+  for(let i=0;i<lines.length;i++){
+    if(lines[i].includes("RESOLUTION")){
+      const match=lines[i].match(/RESOLUTION=\d+x(\d+)/);
+      if(match){
+        const url=lines[i+1].trim();
+        qualities[match[1]]=url.startsWith("http")?url:base+"/"+url;
+      }
+    }
+  }
+  const best=Object.keys(qualities).sort((a,b)=>b-a)[0];
+  videojs("player",{src:qualities[best],type:"application/x-mpegURL",html5:{hls:{enableLowInitialPlaylist:true}}});
+});
+</script>
+</body></html>
+PLAYEREOF
+          
+          RAW_BASE="https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}"
+          sed -i "s|RAW_BASE_PLACEHOLDER|$RAW_BASE|g" "$VIDEO_DIR/player.html"
           
           echo "============================================"
           echo "✅ Completed in $(($SECONDS/60))m $(($SECONDS%60))s"
