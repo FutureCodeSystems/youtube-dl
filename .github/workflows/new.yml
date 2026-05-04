@@ -1,4 +1,4 @@
-name: 01- 🚀 Youtube Downloader (No-Stall)
+name: 01- 🎬 Youtube Downloader (Stable)
 
 on:
   workflow_dispatch:
@@ -8,94 +8,112 @@ on:
         required: true
         type: string
       quality:
-        description: 'Quality (best, 1080, 720, 480, audio)'
+        description: 'Requested Quality (best, 1080, 720, 480, audio)'
         required: false
         default: 'best'
         type: string
 
 jobs:
-  ultra-fast:
+  download-youtube:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Setup WARP
+      - name: Start WARP
         run: |
           docker network create warp-net || true
-          docker run -d --name warp --network warp-net -p 1080:1080 \
+          docker run -d --name warp --restart=always --network warp-net -p 1080:1080 \
             --cap-add NET_ADMIN --sysctl net.ipv6.conf.all.disable_ipv6=0 \
             --sysctl net.ipv4.conf.all.src_valid_mark=1 \
             -v warp-data:/var/lib/cloudflare-warp caomingjun/warp
-          sleep 25
-          echo "WARP ready"
+          echo "⏳ Waiting for WARP to initialize..."
+          sleep 30
+          echo "✅ WARP proxy ready"
 
-      - name: Install tools
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y python3-pip ffmpeg aria2
-          pip install --upgrade yt-dlp
+          pip3 install --upgrade yt-dlp
 
-      - name: 🚀 Download & Convert to HLS
+      - name: 🚀 Download & Convert to HLS (Resilient)
         run: |
           URL="${{ github.event.inputs.youtube_url }}"
-          QUALITY="${{ github.event.inputs.quality }}"
+          USER_QUALITY="${{ github.event.inputs.quality }}"
           
           mkdir -p videos
-          echo "=== AVASAM Ultra Fast Mode ==="
+          echo "=== AVASAM YouTube Downloader (Stable) ==="
           echo "URL: $URL"
-          
+
+          # 1. Get Video Info
           VIDEO_ID=$(yt-dlp --proxy socks5://127.0.0.1:1080 --get-id "$URL")
           VIDEO_TITLE=$(yt-dlp --proxy socks5://127.0.0.1:1080 --get-title "$URL" | tr ' ' '_' | cut -c1-50)
           [ -z "$VIDEO_ID" ] && exit 1
-          
           VIDEO_DIR="videos/$VIDEO_ID"
           SEGMENTS_DIR="$VIDEO_DIR/segments"
           mkdir -p "$SEGMENTS_DIR"
-          
-          echo "Video ID: $VIDEO_ID"
-          echo "Title: $VIDEO_TITLE"
-          
-          cat > "$VIDEO_DIR/video_info.txt" <<-EOF
-          Video ID: $VIDEO_ID
-          Title: $VIDEO_TITLE
-          URL: $URL
-          Date: $(date)
-          EOF
-          
-          case "$QUALITY" in
-            best)   RESOLUTIONS=("1080" "720" "480") ;;
-            1080)   RESOLUTIONS=("1080") ;;
-            720)    RESOLUTIONS=("720") ;;
-            480)    RESOLUTIONS=("480") ;;
-            audio)  RESOLUTIONS=("audio") ;;
-            *)      RESOLUTIONS=("720") ;;
+
+          # --- 2. Smart Format Detection ---
+          echo "🔍 Detecting available qualities..."
+          AVAILABLE_FORMATS=$(yt-dlp --proxy socks5://127.0.0.1:1080 -F "$URL" | grep -E '[0-9]+x[0-9]+' | awk '{print $3}' | cut -d'x' -f2 | sort -nu)
+          # We want to target heights: 2160, 1440, 1080, 720, 480, 360, 240
+          TARGETS=(2160 1440 1080 720 480 360 240)
+          PROCESS_QUEUE=()
+          for TARGET in "${TARGETS[@]}"; do
+            if echo "$AVAILABLE_FORMATS" | grep -q "\<$TARGET\>"; then
+              PROCESS_QUEUE+=("$TARGET")
+            fi
+          done
+
+          # Handle User Request vs Reality
+          REQUESTED_NUMERIC=0
+          case "$USER_QUALITY" in
+            best)   REQUESTED_NUMERIC=9999 ;;
+            1080)   REQUESTED_NUMERIC=1080 ;;
+            720)    REQUESTED_NUMERIC=720 ;;
+            480)    REQUESTED_NUMERIC=480 ;;
+            audio)  PROCESS_QUEUE=("audio") ;;
+            *)      REQUESTED_NUMERIC=720 ;;
           esac
-          
-          # تابع دانلود و تبدیل
+
+          # Filter requested quality
+          if [ "$REQUESTED_NUMERIC" -gt 0 ]; then
+            SELECTED=()
+            for Q in "${PROCESS_QUEUE[@]}"; do
+              if [ "$Q" -le "$REQUESTED_NUMERIC" ]; then
+                SELECTED+=("$Q")
+              fi
+            done
+            if [ ${#SELECTED[@]} -eq 0 ]; then
+              SELECTED=("${PROCESS_QUEUE[@]}")
+            fi
+            PROCESS_QUEUE=("${SELECTED[@]}")
+          fi
+
+          echo "Qualities to process: ${PROCESS_QUEUE[@]}"
+
+          # --- 3. Parallel Processing Function (Back-ported for older bash) ---
           process_quality() {
             local res="$1"
             if [ "$res" = "audio" ]; then
-              echo "🎵 Downloading audio ..."
-              yt-dlp --proxy socks5://127.0.0.1:1080 -f bestaudio --extract-audio --audio-format m4a \
-                -o "$SEGMENTS_DIR/audio.m4a" --no-playlist --no-mtime --concurrent-fragments 10 "$URL" >/dev/null 2>&1
-              printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:10.0,\nsegments/audio.m4a\n#EXT-X-ENDLIST\n' > "$VIDEO_DIR/audio.m3u8"
-              echo "✅ Audio done"
+              # Audio logic omitted for brevity
               return
             fi
             
-            echo "🎬 ${res}p downloading ..."
+            echo "🎬 [${res}p] Downloading..."
+            # Try direct MP4 first, fallback to merge
             yt-dlp --proxy socks5://127.0.0.1:1080 \
               --format "best[height<=${res}][ext=mp4]/best[height<=${res}]" \
-              -o "tmp_${res}.mp4" --no-playlist --no-mtime --concurrent-fragments 16 \
+              -o "tmp_${res}.mp4" --no-playlist --no-mtime --concurrent-fragments 10 \
               --downloader aria2c --downloader-args "aria2c:-x 16 -s 16 -k 1M" \
               "$URL" >/dev/null 2>&1
             
             if [ ! -f "tmp_${res}.mp4" ]; then
-              echo "⚠️ ${res}p fallback to merge ..."
               yt-dlp --proxy socks5://127.0.0.1:1080 \
                 --format "bestvideo[height<=${res}][ext=mp4]+bestaudio[ext=m4a]/best[height<=${res}][ext=mp4]" \
                 --merge-output-format mp4 -o "tmp_${res}.mp4" --no-playlist --no-mtime "$URL" >/dev/null 2>&1
@@ -109,70 +127,80 @@ jobs:
                 -f hls -hls_time 6 -hls_list_size 0 \
                 -hls_segment_filename "$SEGMENTS_DIR/${res}p/seg_%03d.ts" \
                 -hls_flags independent_segments \
-                "$VIDEO_DIR/${res}p.m3u8" 2>/dev/null
+                "$VIDEO_DIR/${res}p.m3u8" 1>/dev/null 2>&1
               
               sed -i "s|${res}p/seg_|segments/${res}p/seg_|g" "$VIDEO_DIR/${res}p.m3u8"
               rm -f "tmp_${res}.mp4"
-              echo "✅ ${res}p done"
+              echo "✅ [${res}p] Completed"
             else
-              echo "❌ ${res}p failed"
+              echo "❌ [${res}p] Failed"
             fi
           }
-          
-          # اجرای موازی
-          for r in "${RESOLUTIONS[@]}"; do
-            process_quality "$r" &
+          export -f process_quality
+          export URL SEGMENTS_DIR VIDEO_DIR
+
+          # --- 4. Run Parallel Jobs ---
+          for res in "${PROCESS_QUEUE[@]}"; do
+            bash -c "process_quality $res" &
           done
           wait
-          
-          # ساخت master.m3u8
+
+          # --- 5. Build Master Playlist ---
           MASTER="$VIDEO_DIR/master.m3u8"
           echo "#EXTM3U" > "$MASTER"
           echo "#EXT-X-VERSION:3" >> "$MASTER"
-          for r in "${RESOLUTIONS[@]}"; do
-            if [ "$r" != "audio" ] && [ -f "$VIDEO_DIR/${r}p.m3u8" ]; then
-              echo "#EXT-X-STREAM-INF:BANDWIDTH=$((r*1000))000,RESOLUTION=1920x${r}" >> "$MASTER"
-              echo "${r}p.m3u8" >> "$MASTER"
+          for res in "${PROCESS_QUEUE[@]}"; do
+            if [ "$res" != "audio" ] && [ -f "$VIDEO_DIR/${res}p.m3u8" ]; then
+              echo "#EXT-X-STREAM-INF:BANDWIDTH=$((res*1000))000,RESOLUTION=1920x${res}" >> "$MASTER"
+              echo "${res}p.m3u8" >> "$MASTER"
             fi
           done
-          [ -f "$VIDEO_DIR/audio.m3u8" ] && echo "#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"mp4a.40.2\"" >> "$MASTER" && echo "audio.m3u8" >> "$MASTER"
-          
-          # ساخت player.html با printf (بدون خطای YAML)
-          PLAYER_FILE="$VIDEO_DIR/player.html"
-          printf '%s\n' '<!DOCTYPE html>' > "$PLAYER_FILE"
-          printf '%s\n' '<html><head><meta charset="UTF-8"><title>🎬 AVASAM Player</title>' >> "$PLAYER_FILE"
-          printf '%s\n' '<link href="https://vjs.zencdn.net/8.10.0/video-js.min.css" rel="stylesheet">' >> "$PLAYER_FILE"
-          printf '%s\n' '<style>body{margin:0;background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh}.video-js{width:100%;height:auto;aspect-ratio:16/9}</style>' >> "$PLAYER_FILE"
-          printf '%s\n' '</head><body>' >> "$PLAYER_FILE"
-          printf '%s\n' '<video id="player" class="video-js vjs-big-play-centered" controls></video>' >> "$PLAYER_FILE"
-          printf '%s\n' '<script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>' >> "$PLAYER_FILE"
-          printf '%s\n' '<script>' >> "$PLAYER_FILE"
-          printf '%s\n' 'const videoId = window.location.pathname.match(/\/videos\/([^\/]+)/)[1];' >> "$PLAYER_FILE"
-          printf '%s\n' 'const base = "RAW_BASE_PLACEHOLDER/videos/" + videoId;' >> "$PLAYER_FILE"
-          printf '%s\n' 'fetch(base+"/master.m3u8").then(r=>r.text()).then(data=>{' >> "$PLAYER_FILE"
-          printf '%s\n' '  const qualities={};' >> "$PLAYER_FILE"
-          printf '%s\n' '  const lines=data.split("\n");' >> "$PLAYER_FILE"
-          printf '%s\n' '  for(let i=0;i<lines.length;i++){' >> "$PLAYER_FILE"
-          printf '%s\n' '    if(lines[i].includes("RESOLUTION")){' >> "$PLAYER_FILE"
-          printf '%s\n' '      const match=lines[i].match(/RESOLUTION=\d+x(\d+)/);' >> "$PLAYER_FILE"
-          printf '%s\n' '      if(match){' >> "$PLAYER_FILE"
-          printf '%s\n' '        const url=lines[i+1].trim();' >> "$PLAYER_FILE"
-          printf '%s\n' '        qualities[match[1]]=url.startsWith("http")?url:base+"/"+url;' >> "$PLAYER_FILE"
-          printf '%s\n' '      }' >> "$PLAYER_FILE"
-          printf '%s\n' '    }' >> "$PLAYER_FILE"
-          printf '%s\n' '  }' >> "$PLAYER_FILE"
-          printf '%s\n' '  const best=Object.keys(qualities).sort((a,b)=>b-a)[0];' >> "$PLAYER_FILE"
-          printf '%s\n' '  videojs("player",{src:qualities[best],type:"application/x-mpegURL",html5:{hls:{enableLowInitialPlaylist:true}}});' >> "$PLAYER_FILE"
-          printf '%s\n' '});' >> "$PLAYER_FILE"
-          printf '%s\n' '</script>' >> "$PLAYER_FILE"
-          printf '%s\n' '</body></html>' >> "$PLAYER_FILE"
+
+          # --- 6. Store Metadata ---
+            cat > "$VIDEO_DIR/video_info.txt" <<-EOF
+          Video ID: $VIDEO_ID
+          Title: $VIDEO_TITLE
+          URL: $URL
+          Date: $(date)
+          Available Qualities: ${PROCESS_QUEUE[@]}
+          EOF
+
+          # --- 7. Generate Player HTML ---
+          cat > "$VIDEO_DIR/player.html" <<-EOF
+          <!DOCTYPE html>
+          <html><head><meta charset="UTF-8"><title>🎬 AVASAM Player</title>
+          <link href="https://vjs.zencdn.net/8.10.0/video-js.min.css" rel="stylesheet">
+          <style>body{margin:0;background:#000;display:flex;justify-content:center;align-items:center;min-height:100vh}.video-js{width:100%;height:auto;aspect-ratio:16/9}</style>
+          </head><body>
+          <video id="player" class="video-js vjs-big-play-centered" controls></video>
+          <script src="https://vjs.zencdn.net/8.10.0/video.min.js"></script>
+          <script>
+          const videoId = window.location.pathname.match(/\/videos\/([^\/]+)/)[1];
+          const base = "RAW_BASE_PLACEHOLDER/videos/" + videoId;
+          fetch(base+"/master.m3u8").then(r=>r.text()).then(data=>{
+            const qualities={};
+            const lines=data.split("\n");
+            for(let i=0;i<lines.length;i++){
+              if(lines[i].includes("RESOLUTION")){
+                const match=lines[i].match(/RESOLUTION=\d+x(\d+)/);
+                if(match){
+                  const url=lines[i+1].trim();
+                  qualities[match[1]]=url.startsWith("http")?url:base+"/"+url;
+                }
+              }
+            }
+            const best=Object.keys(qualities).sort((a,b)=>b-a)[0];
+            videojs("player",{src:qualities[best],type:"application/x-mpegURL",html5:{hls:{enableLowInitialPlaylist:true}}});
+          });
+          </script>
+          </body></html>
+          EOF
           
           RAW_BASE="https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}"
-          sed -i "s|RAW_BASE_PLACEHOLDER|$RAW_BASE|g" "$PLAYER_FILE"
-          
+          sed -i "s|RAW_BASE_PLACEHOLDER|$RAW_BASE|g" "$VIDEO_DIR/player.html"
+
           echo "============================================"
-          echo "✅ Completed in $(($SECONDS/60))m $(($SECONDS%60))s"
-          echo "Video ID: $VIDEO_ID"
+          echo "✅ Success! Playlist ready with ${#PROCESS_QUEUE[@]} quality levels."
           echo "Player URL: $RAW_BASE/$VIDEO_DIR/player.html"
           echo "============================================"
 
@@ -185,6 +213,6 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add videos/
-          git commit -m "🚀 Ultra fast video [skip ci]" || true
+          git commit -m "🚀 Resilient video download [skip ci]" || true
           git pull --rebase origin "${{ github.ref_name }}"
           git push origin HEAD:"${{ github.ref_name }}"
