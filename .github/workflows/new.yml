@@ -124,16 +124,14 @@ jobs:
                 --no-playlist \
                 "$URL" || continue
               
-              cat > "${VIDEO_DIR}/audio.m3u8" << 'AUDIOEOF'
-#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-ALLOW-CACHE:YES
-#EXT-X-TARGETDURATION:10
-#EXT-X-MEDIA-SEQUENCE:0
-#EXTINF:10.0,
-segments/audio.m4a
-#EXT-X-ENDLIST
-AUDIOEOF
+              printf '%s\n' "#EXTM3U" > "${VIDEO_DIR}/audio.m3u8"
+              printf '%s\n' "#EXT-X-VERSION:3" >> "${VIDEO_DIR}/audio.m3u8"
+              printf '%s\n' "#EXT-X-ALLOW-CACHE:YES" >> "${VIDEO_DIR}/audio.m3u8"
+              printf '%s\n' "#EXT-X-TARGETDURATION:10" >> "${VIDEO_DIR}/audio.m3u8"
+              printf '%s\n' "#EXT-X-MEDIA-SEQUENCE:0" >> "${VIDEO_DIR}/audio.m3u8"
+              printf '%s\n' "#EXTINF:10.0," >> "${VIDEO_DIR}/audio.m3u8"
+              printf '%s\n' "segments/audio.m4a" >> "${VIDEO_DIR}/audio.m3u8"
+              printf '%s\n' "#EXT-X-ENDLIST" >> "${VIDEO_DIR}/audio.m3u8"
               
               echo "✅ Audio downloaded"
               continue
@@ -175,22 +173,20 @@ AUDIOEOF
           done
           
           MASTER_PLAYLIST="${VIDEO_DIR}/master.m3u8"
-          cat > "$MASTER_PLAYLIST" << MASTEREOF
-#EXTM3U
-#EXT-X-VERSION:3
-MASTEREOF
+          printf '%s\n' "#EXTM3U" > "$MASTER_PLAYLIST"
+          printf '%s\n' "#EXT-X-VERSION:3" >> "$MASTER_PLAYLIST"
           
           for Q in "${QUALITIES[@]}"; do
             if [ "$Q" != "audio" ] && [ -f "${VIDEO_DIR}/${Q}p.m3u8" ]; then
               BANDWIDTH=$((Q * 1000))
-              echo "#EXT-X-STREAM-INF:BANDWIDTH=${BANDWIDTH}000,RESOLUTION=1920x${Q}" >> "$MASTER_PLAYLIST"
-              echo "${Q}p.m3u8" >> "$MASTER_PLAYLIST"
+              printf '%s\n' "#EXT-X-STREAM-INF:BANDWIDTH=${BANDWIDTH}000,RESOLUTION=1920x${Q}" >> "$MASTER_PLAYLIST"
+              printf '%s\n' "${Q}p.m3u8" >> "$MASTER_PLAYLIST"
             fi
           done
           
           if [ -f "${VIDEO_DIR}/audio.m3u8" ]; then
-            echo "#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"mp4a.40.2\"" >> "$MASTER_PLAYLIST"
-            echo "audio.m3u8" >> "$MASTER_PLAYLIST"
+            printf '%s\n' "#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS=\"mp4a.40.2\"" >> "$MASTER_PLAYLIST"
+            printf '%s\n' "audio.m3u8" >> "$MASTER_PLAYLIST"
           fi
           
           PLAYER_HTML="${VIDEO_DIR}/player.html"
@@ -198,77 +194,76 @@ MASTEREOF
 <!DOCTYPE html>
 <html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>🎬 AVASAM HLS Player</title>
-    <link href="https://vjs.zencdn.net/7.20.3/video-js.css" rel="stylesheet">
-    <style>
-        body{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);margin:0;padding:20px;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;min-height:100vh;display:flex;justify-content:center;align-items:center}
-        .container{max-width:1200px;width:100%;background:white;border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.3);overflow:hidden;padding:20px}
-        .header{text-align:center;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;margin:-20px -20px 20px -20px}
-        .header h1{margin:0;font-size:1.8em}
-        .header p{margin:10px 0 0;opacity:0.9}
-        .video-container{border-radius:10px;overflow:hidden;background:#000}
-        .quality-selector{margin-top:20px;text-align:center}
-        .quality-btn{background:#667eea;color:white;border:none;padding:10px 20px;margin:5px;border-radius:8px;cursor:pointer;transition:all 0.3s;font-size:14px}
-        .quality-btn:hover{background:#764ba2;transform:translateY(-2px)}
-        .quality-btn.active{background:#4CAF50;box-shadow:0 4px 15px rgba(76,175,80,0.3)}
-        .info{margin-top:20px;padding:15px;background:#f5f5f5;border-radius:10px;text-align:center;font-size:14px;color:#666}
-        .badge{display:inline-block;background:#4CAF50;color:white;padding:5px 10px;border-radius:20px;font-size:12px;margin:5px}
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>🎬 AVASAM HLS Player</title>
+<link href="https://vjs.zencdn.net/7.20.3/video-js.css" rel="stylesheet">
+<style>
+body{background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);margin:0;padding:20px;font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif;min-height:100vh;display:flex;justify-content:center;align-items:center}
+.container{max-width:1200px;width:100%;background:white;border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.3);overflow:hidden;padding:20px}
+.header{text-align:center;padding:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;margin:-20px -20px 20px -20px}
+.header h1{margin:0;font-size:1.8em}
+.header p{margin:10px 0 0;opacity:0.9}
+.video-container{border-radius:10px;overflow:hidden;background:#000}
+.quality-selector{margin-top:20px;text-align:center}
+.quality-btn{background:#667eea;color:white;border:none;padding:10px 20px;margin:5px;border-radius:8px;cursor:pointer;transition:all 0.3s;font-size:14px}
+.quality-btn:hover{background:#764ba2;transform:translateY(-2px)}
+.quality-btn.active{background:#4CAF50;box-shadow:0 4px 15px rgba(76,175,80,0.3)}
+.info{margin-top:20px;padding:15px;background:#f5f5f5;border-radius:10px;text-align:center;font-size:14px;color:#666}
+.badge{display:inline-block;background:#4CAF50;color:white;padding:5px 10px;border-radius:20px;font-size:12px;margin:5px}
+</style>
 </head>
 <body>
 <div class="container">
-    <div class="header">
-        <h1>🎬 AVASAM HLS Video Player</h1>
-        <p>Stream directly from GitHub • No download needed</p>
-    </div>
-    <div class="video-container">
-        <video id="my-video" class="video-js vjs-big-play-centered vjs-16-9" controls preload="auto" width="100%" height="auto">
-            <p class="vjs-no-js">To view this video please enable JavaScript.</p>
-        </video>
-    </div>
-    <div class="quality-selector" id="quality-selector"></div>
-    <div class="info">
-        <span class="badge">⚡ HLS Streaming</span>
-        <span class="badge">🎥 Adaptive Bitrate</span>
-        <span class="badge">📱 Mobile Ready</span>
-        <p style="margin-top:10px">🌐 <strong>AVASAM</strong> - YouTube Downloader | <a href="https://avasam.ir" target="_blank">https://avasam.ir</a></p>
-    </div>
+<div class="header">
+<h1>🎬 AVASAM HLS Video Player</h1>
+<p>Stream directly from GitHub • No download needed</p>
+</div>
+<div class="video-container">
+<video id="my-video" class="video-js vjs-big-play-centered vjs-16-9" controls preload="auto" width="100%" height="auto">
+<p class="vjs-no-js">To view this video please enable JavaScript.</p>
+</video>
+</div>
+<div class="quality-selector" id="quality-selector"></div>
+<div class="info">
+<span class="badge">⚡ HLS Streaming</span>
+<span class="badge">🎥 Adaptive Bitrate</span>
+<span class="badge">📱 Mobile Ready</span>
+<p style="margin-top:10px">🌐 <strong>AVASAM</strong> - YouTube Downloader | <a href="https://avasam.ir" target="_blank">https://avasam.ir</a></p>
+</div>
 </div>
 <script src="https://vjs.zencdn.net/7.20.3/video.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/videojs-contrib-hls@5.15.0/dist/videojs-contrib-hls.min.js"></script>
 <script>
-    const qualities = {};
-    fetch('master.m3u8')
-        .then(response => response.text())
-        .then(data => {
-            const lines = data.split('\n');
-            for(let i = 0; i < lines.length; i++) {
-                if(lines[i].includes('RESOLUTION')) {
-                    const resolution = lines[i].match(/RESOLUTION=\d+x(\d+)/)[1];
-                    const url = lines[i+1];
-                    qualities[resolution+'p'] = url;
-                }
-            }
-            const selector = document.getElementById('quality-selector');
-            for(const [quality, url] of Object.entries(qualities)) {
-                const btn = document.createElement('button');
-                btn.textContent = quality;
-                btn.className = 'quality-btn';
-                btn.onclick = () => {
-                    document.querySelectorAll('.quality-btn').forEach(b => b.classList.remove('active'));
-                    btn.classList.add('active');
-                    player.src({src: url, type: 'application/x-mpegURL'});
-                    player.play();
-                };
-                selector.appendChild(btn);
-            }
-            if(selector.children.length > 0) selector.children[0].click();
-        });
-    var player = videojs('my-video', {
-        html5: { hls: { enableLowInitialPlaylist: true, smoothQualityChange: true } }
-    });
+var qualities={};
+fetch('master.m3u8').then(function(response){return response.text();}).then(function(data){
+var lines=data.split('\n');
+for(var i=0;i<lines.length;i++){
+if(lines[i].includes('RESOLUTION')){
+var resolution=lines[i].match(/RESOLUTION=\d+x(\d+)/)[1];
+var url=lines[i+1];
+qualities[resolution+'p']=url;
+}
+}
+var selector=document.getElementById('quality-selector');
+for(var q in qualities){
+if(qualities.hasOwnProperty(q)){
+var btn=document.createElement('button');
+btn.textContent=q;
+btn.className='quality-btn';
+btn.onclick=(function(quality,url){
+return function(){
+document.querySelectorAll('.quality-btn').forEach(function(b){b.classList.remove('active');});
+this.classList.add('active');
+player.src({src:url,type:'application/x-mpegURL'});
+player.play();
+};})(q,qualities[q]);
+selector.appendChild(btn);
+}
+}
+if(selector.children.length>0){selector.children[0].click();}
+});
+var player=videojs('my-video',{html5:{hls:{enableLowInitialPlaylist:true,smoothQualityChange:true}}});
 </script>
 </body>
 </html>
@@ -310,7 +305,7 @@ PLAYEREOF
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
+          git config.user.email "github-actions@github.com"
           BRANCH="${GITHUB_REF_NAME}"
           
           find videos -type f \( -name "*.ts" -o -name "*.m3u8" -o -name "*.html" -o -name "*.m4a" \) | while read file; do
