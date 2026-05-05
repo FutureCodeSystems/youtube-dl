@@ -96,9 +96,6 @@ jobs:
 
           COOKIES_OPT="${COOKIES_OPT:-}"
 
-          echo "ℹ️ Using proxy: ${PROXY_OPT:-none}"
-          echo "ℹ️ Using cookies: ${COOKIES_OPT:-none}"
-
           VIDEO_ID=$(yt-dlp $PROXY_OPT $COOKIES_OPT --get-id --no-playlist "$URL" 2>/dev/null)
           VIDEO_TITLE=$(yt-dlp $PROXY_OPT $COOKIES_OPT --get-title --no-playlist "$URL" 2>/dev/null | sed 's/[^a-zA-Z0-9\-_ ]/ /g' | cut -c1-100)
           if [ -z "$VIDEO_ID" ]; then
@@ -137,16 +134,7 @@ jobs:
                 --output "${SEGMENTS_DIR}/audio.m4a" \
                 --no-playlist --no-mtime \
                 "$URL" && {
-                  cat > "${VIDEO_DIR}/audio.m3u8" << AUDIO_M3U8
-#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-ALLOW-CACHE:YES
-#EXT-X-TARGETDURATION:10
-#EXT-X-MEDIA-SEQUENCE:0
-#EXTINF:10.0,
-segments/audio.m4a
-#EXT-X-ENDLIST
-AUDIO_M3U8
+                  printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-ALLOW-CACHE:YES\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:10.0,\nsegments/audio.m4a\n#EXT-X-ENDLIST\n' > "${VIDEO_DIR}/audio.m3u8"
                   echo "✅ Audio done"
                 }
               return
@@ -177,7 +165,6 @@ AUDIO_M3U8
             fi
 
             mkdir -p "${SEGMENTS_DIR}/${Q}p"
-
             ffmpeg -i "$TEMP_MP4" \
               -c:v libx264 -preset ultrafast -crf 28 -tune fastdecode \
               -c:a aac -b:a 128k -movflags +faststart \
@@ -188,7 +175,6 @@ AUDIO_M3U8
               "${VIDEO_DIR}/${Q}p.m3u8" -loglevel error
 
             sed -i "s|^segment_|segments/${Q}p/segment_|g" "${VIDEO_DIR}/${Q}p.m3u8"
-
             rm -f "$TEMP_MP4"
             echo "✅ ${Q}p done"
           }
@@ -201,29 +187,26 @@ AUDIO_M3U8
           wait
 
           MASTER="${VIDEO_DIR}/master.m3u8"
-          cat > "$MASTER" << MASTER_M3U8
-#EXTM3U
-#EXT-X-VERSION:3
-MASTER_M3U8
+          printf '#EXTM3U\n#EXT-X-VERSION:3\n' > "$MASTER"
           for Q in "${QUALITIES[@]}"; do
             if [ "$Q" != "audio" ] && [ -f "${VIDEO_DIR}/${Q}p.m3u8" ]; then
               BANDWIDTH=$((Q * 1000))
-              echo "#EXT-X-STREAM-INF:BANDWIDTH=${BANDWIDTH}000,RESOLUTION=1920x${Q}" >> "$MASTER"
-              echo "${Q}p.m3u8" >> "$MASTER"
+              printf '#EXT-X-STREAM-INF:BANDWIDTH=%d000,RESOLUTION=1920x%s\n' "$BANDWIDTH" "$Q" >> "$MASTER"
+              printf '%sp.m3u8\n' "$Q" >> "$MASTER"
             fi
           done
           if [ -f "${VIDEO_DIR}/audio.m3u8" ]; then
-            echo '#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS="mp4a.40.2"' >> "$MASTER"
-            echo 'audio.m3u8' >> "$MASTER"
+            printf '#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS="mp4a.40.2"\naudio.m3u8\n' >> "$MASTER"
           fi
 
           PLAYER_FILE="${VIDEO_DIR}/player.html"
-          cat > "$PLAYER_FILE" << 'PLAYER_HTML'
+          # Use a here-doc to write the player HTML safely
+          cat > "$PLAYER_FILE" << 'PLAYER_HTML_EOF'
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=yes">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
 <title>AVASAM HLS Player</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -244,11 +227,10 @@ button.active{background:#007aff}
 <div class="status" id="status">Loading...</div>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 <script>
-const VIDEO_ID = window.location.pathname.match(/\/videos\/([^\/]+)/)[1];
-const BASE_URL = "https://raw.githubusercontent.com/${GITHUB_REPOSITORY_OWNER}/${GITHUB_REPOSITORY_NAME#*/}/${GITHUB_REF_NAME#refs/heads/}/videos/" + VIDEO_ID;
-const video = document.getElementById("video");
-const qualityDiv = document.getElementById("quality-buttons");
-const statusDiv = document.getElementById("status");
+const BASE_URL = "https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/videos/__VIDEO_ID__";
+const video = document.getElementById('video');
+const qualityDiv = document.getElementById('quality-buttons');
+const statusDiv = document.getElementById('status');
 let hls = null;
 
 function log(msg, isError) {
@@ -269,16 +251,16 @@ async function fetchQualities() {
     const line = lines[i].trim();
     if (line.includes("#EXT-X-STREAM-INF") && line.includes("RESOLUTION=")) {
       const match = line.match(/RESOLUTION=\d+x(\d+)/);
-      if (match && i + 1 < lines.length) {
+      if (match && i+1 < lines.length) {
         const resolution = match[1];
-        let playlist = lines[i + 1].trim();
+        let playlist = lines[i+1].trim();
         if (!playlist.startsWith("http")) playlist = BASE_URL + "/" + playlist;
         qualities.push({ label: resolution + "p", url: playlist, quality: resolution });
       }
     }
   }
   if (qualities.length === 0) throw new Error("No quality found");
-  qualities.sort((a, b) => parseInt(b.label) - parseInt(a.label));
+  qualities.sort((a,b) => parseInt(b.label) - parseInt(a.label));
   return qualities;
 }
 
@@ -291,7 +273,7 @@ async function fixM3u8Segments(playlistUrl, quality) {
   for (let line of lines) {
     line = line.trim();
     if (line && !line.startsWith("#") && line.endsWith(".ts")) {
-      const corrected = BASE_URL + "/segments/" + quality + "p/" + line;
+      const corrected = `${BASE_URL}/segments/${quality}p/${line}`;
       newLines.push(corrected);
     } else {
       newLines.push(line);
@@ -313,22 +295,22 @@ async function playQuality(qualityUrl, label, qualityNum) {
   }
   const blob = new Blob([fixed], { type: "application/vnd.apple.mpegurl" });
   const blobUrl = URL.createObjectURL(blob);
+
   if (hls) { hls.destroy(); hls = null; }
+
   if (Hls.isSupported()) {
     hls = new Hls({ capLevelToPlayerSize: true });
     hls.loadSource(blobUrl);
     hls.attachMedia(video);
-    hls.on(Hls.Events.MANIFEST_PARSED, function() {
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
       video.currentTime = currentTime;
       if (wasPlaying) video.play();
       log("Playing " + label);
     });
-    hls.on(Hls.Events.ERROR, function(_, data) {
-      log("HLS error: " + data.type, true);
-    });
+    hls.on(Hls.Events.ERROR, (_, data) => log("HLS error: " + data.type, true));
   } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
     video.src = blobUrl;
-    video.addEventListener("loadedmetadata", function() {
+    video.addEventListener("loadedmetadata", () => {
       video.currentTime = currentTime;
       if (wasPlaying) video.play();
     });
@@ -342,11 +324,11 @@ async function init() {
   try {
     const qualities = await fetchQualities();
     qualityDiv.innerHTML = "";
-    qualities.forEach(function(q, idx) {
+    qualities.forEach((q, idx) => {
       const btn = document.createElement("button");
       btn.textContent = q.label;
-      btn.onclick = function() {
-        document.querySelectorAll("#quality-buttons button").forEach(function(b) { b.classList.remove("active"); });
+      btn.onclick = () => {
+        document.querySelectorAll("#quality-buttons button").forEach(b => b.classList.remove("active"));
         btn.classList.add("active");
         playQuality(q.url, q.label, q.quality);
       };
@@ -355,7 +337,7 @@ async function init() {
     });
   } catch (err) {
     log("Init error: " + err.message, true);
-    qualityDiv.innerHTML = "<div style=\"color:#ff6b6b\">Error: " + err.message + "</div>";
+    qualityDiv.innerHTML = `<div style="color:#ff6b6b">Error: ${err.message}</div>`;
   }
 }
 
@@ -363,16 +345,12 @@ init();
 </script>
 </body>
 </html>
-PLAYER_HTML
+PLAYER_HTML_EOF
 
-          # Replace GitHub variables in player.html
-          sed -i "s|\${GITHUB_REPOSITORY_OWNER}|${{ github.repository_owner }}|g" "$PLAYER_FILE"
-          sed -i "s|\${GITHUB_REPOSITORY_NAME#*/}|${{ github.event.repository.name }}|g" "$PLAYER_FILE"
-          sed -i "s|\${GITHUB_REF_NAME#refs/heads/}|${GITHUB_REF_NAME}|g" "$PLAYER_FILE"
+          # Replace the placeholder VIDEO_ID with the actual ID
+          sed -i "s|__VIDEO_ID__|${VIDEO_ID}|g" "$PLAYER_FILE"
 
           echo "✅ Done. Output: $VIDEO_DIR"
-          echo "📁 Video ID: $VIDEO_ID"
-          echo "🔗 Player URL: https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/${VIDEO_DIR}/player.html"
 
       - name: Stop WARP
         if: always()
