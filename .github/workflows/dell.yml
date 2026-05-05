@@ -1,0 +1,34 @@
+name: Clean directories except workflows
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  clean:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Clean all directories except workflows
+      run: |
+        # پیدا کردن همه پوشه‌ها به جز .github/workflows
+        find . -maxdepth 1 -type d ! -name "." ! -name ".github" ! -name ".git" | while read dir; do
+          echo "Deleting directory: $dir"
+          rm -rf "$dir"
+        done
+        
+        # اگر پوشه .github وجود دارد اما workflows را حفظ کنیم
+        if [ -d ".github" ]; then
+          # پیدا کردن همه چیز داخل .github به جز workflows
+          find .github -maxdepth 1 ! -name ".github" ! -name "workflows" -type d -exec rm -rf {} + 2>/dev/null || true
+          find .github -maxdepth 1 ! -name ".github" ! -name "workflows" -type f -exec rm -f {} + 2>/dev/null || true
+        fi
+        
+    - name: List remaining files
+      run: |
+        echo "Remaining directories:"
+        ls -la
