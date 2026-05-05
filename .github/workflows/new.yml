@@ -72,7 +72,7 @@ jobs:
             PROXY_OPT="--proxy socks5://127.0.0.1:1080"
           fi
 
-          # Get both ID and title in a single yt-dlp call (tab-separated)
+          # Get both ID and title in one call
           INFO=$(yt-dlp $PROXY_OPT --print "%(id)s\t%(title)s" --no-playlist "$URL")
           VIDEO_ID=$(echo "$INFO" | head -1 | cut -f1)
           VIDEO_TITLE=$(echo "$INFO" | head -1 | cut -f2-)
@@ -82,10 +82,7 @@ jobs:
             exit 1
           fi
 
-          # Sanitize and safely truncate title (character-wise, UTF-8 safe)
           SAFE_TITLE=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9\-_ ]/ /g' | head -c 100 | sed 's/ *$//')
-          # Alternative: use bash substring (character-safe) but ensure length not exceed
-          # SAFE_TITLE="${SAFE_TITLE:0:100}"   # already done via head -c 100
 
           VIDEO_DIR="videos/${VIDEO_ID}"
           SEGMENTS_DIR="${VIDEO_DIR}/segments"
@@ -100,7 +97,6 @@ jobs:
             echo "Quality Requested: $QUALITY"
           } > "${VIDEO_DIR}/video_info.txt"
 
-          # Determine qualities based on input
           case "$QUALITY" in
             best)   QUALITIES=("1080" "720" "480") ;;
             1080)   QUALITIES=("1080") ;;
@@ -110,12 +106,10 @@ jobs:
             *)      QUALITIES=("1080" "720" "480") ;;
           esac
 
-          # Map quality to resolution and bandwidth for master playlist
           declare -A RES_MAP BW_MAP
           RES_MAP=( ["1080"]="1920x1080" ["720"]="1280x720" ["480"]="854x480" )
           BW_MAP=( ["1080"]="5000000" ["720"]="2800000" ["480"]="1400000" )
 
-          # Process each quality
           for Q in "${QUALITIES[@]}"; do
             if [ "$Q" == "audio" ]; then
               echo "🎵 Downloading & segmenting audio..."
@@ -131,7 +125,7 @@ jobs:
               ffmpeg -i "$TEMP_AUDIO" \
                 -c:a aac -b:a 128k \
                 -f hls -hls_time 10 -hls_list_size 0 \
-                -hls_segment_filename "segments/audio/segment_%03d.ts" \
+                -hls_segment_filename "${SEGMENTS_DIR}/audio/segment_%03d.ts" \
                 -hls_flags independent_segments \
                 "${VIDEO_DIR}/audio.m3u8" -loglevel error
 
@@ -143,7 +137,6 @@ jobs:
             echo "🎬 Processing ${Q}p"
             TEMP_MP4="tmp_${Q}.mp4"
 
-            # Try best single video+audio format, fallback to separate video and audio
             yt-dlp $PROXY_OPT \
               --format "best[height<=${Q}][ext=mp4]/best[height<=${Q}]" \
               --output "$TEMP_MP4" \
@@ -165,11 +158,12 @@ jobs:
 
             mkdir -p "${SEGMENTS_DIR}/${Q}p"
 
+            # 🔧 اصلاح کلیدی: استفاده از مسیر مطلق برای segment_filename
             ffmpeg -i "$TEMP_MP4" \
               -c:v libx264 -preset ultrafast -crf 28 -tune fastdecode \
               -c:a aac -b:a 128k \
               -f hls -hls_time 10 -hls_list_size 0 \
-              -hls_segment_filename "segments/${Q}p/segment_%03d.ts" \
+              -hls_segment_filename "${SEGMENTS_DIR}/${Q}p/segment_%03d.ts" \
               -hls_flags independent_segments \
               -threads auto \
               "${VIDEO_DIR}/${Q}p.m3u8" -loglevel error
@@ -178,7 +172,7 @@ jobs:
             echo "✅ ${Q}p done"
           done
 
-          # Create master.m3u8
+          # ساخت master.m3u8
           MASTER="${VIDEO_DIR}/master.m3u8"
           printf '#EXTM3U\n#EXT-X-VERSION:3\n' > "$MASTER"
           for Q in "${QUALITIES[@]}"; do
@@ -206,12 +200,10 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add videos/
-          # Only commit if there are changes
           if git diff --quiet --staged; then
             echo "No changes to commit"
           else
             git commit -m "Ultra fast HLS video [skip ci]"
           fi
-          # Pull with rebase, abort on conflict (will fail the job)
           git pull --rebase origin "${{ github.ref_name }}" || { echo "❌ Rebase failed"; exit 1; }
           git push origin HEAD:"${{ github.ref_name }}"
