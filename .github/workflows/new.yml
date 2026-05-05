@@ -134,7 +134,15 @@ jobs:
                 --output "${SEGMENTS_DIR}/audio.m4a" \
                 --no-playlist --no-mtime \
                 "$URL" && {
-                  printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-ALLOW-CACHE:YES\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:10.0,\nsegments/audio.m4a\n#EXT-X-ENDLIST\n' > "${VIDEO_DIR}/audio.m3u8"
+                  # Use printf to create audio.m3u8 (safe)
+                  printf '%s\n' "#EXTM3U" > "${VIDEO_DIR}/audio.m3u8"
+                  printf '%s\n' "#EXT-X-VERSION:3" >> "${VIDEO_DIR}/audio.m3u8"
+                  printf '%s\n' "#EXT-X-ALLOW-CACHE:YES" >> "${VIDEO_DIR}/audio.m3u8"
+                  printf '%s\n' "#EXT-X-TARGETDURATION:10" >> "${VIDEO_DIR}/audio.m3u8"
+                  printf '%s\n' "#EXT-X-MEDIA-SEQUENCE:0" >> "${VIDEO_DIR}/audio.m3u8"
+                  printf '%s\n' "#EXTINF:10.0," >> "${VIDEO_DIR}/audio.m3u8"
+                  printf '%s\n' "segments/audio.m4a" >> "${VIDEO_DIR}/audio.m3u8"
+                  printf '%s\n' "#EXT-X-ENDLIST" >> "${VIDEO_DIR}/audio.m3u8"
                   echo "✅ Audio done"
                 }
               return
@@ -187,7 +195,8 @@ jobs:
           wait
 
           MASTER="${VIDEO_DIR}/master.m3u8"
-          printf '#EXTM3U\n#EXT-X-VERSION:3\n' > "$MASTER"
+          printf '#EXTM3U\n' > "$MASTER"
+          printf '#EXT-X-VERSION:3\n' >> "$MASTER"
           for Q in "${QUALITIES[@]}"; do
             if [ "$Q" != "audio" ] && [ -f "${VIDEO_DIR}/${Q}p.m3u8" ]; then
               BANDWIDTH=$((Q * 1000))
@@ -199,158 +208,133 @@ jobs:
             printf '#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS="mp4a.40.2"\naudio.m3u8\n' >> "$MASTER"
           fi
 
+          # ========== Generate player.html using printf (safe, no here-doc) ==========
           PLAYER_FILE="${VIDEO_DIR}/player.html"
-          # Use a here-doc to write the player HTML safely
-          cat > "$PLAYER_FILE" << 'PLAYER_HTML_EOF'
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes">
-<title>AVASAM HLS Player</title>
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-body{background:#000;font-family:system-ui}
-.container{display:flex;flex-direction:column;height:100vh}
-video{flex:1;width:100%;object-fit:contain}
-.controls{background:#1a1a1a;padding:12px;display:flex;gap:10px;flex-wrap:wrap;justify-content:center;border-top:1px solid #333}
-button{background:#333;border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer}
-button.active{background:#007aff}
-.status{position:fixed;bottom:10px;left:10px;background:rgba(0,0,0,0.7);color:#0f0;padding:4px 12px;border-radius:16px;font-size:12px;font-family:monospace;pointer-events:none}
-</style>
-</head>
-<body>
-<div class="container">
-<video id="video" controls playsinline></video>
-<div class="controls" id="quality-buttons"></div>
-</div>
-<div class="status" id="status">Loading...</div>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
-<script>
-const BASE_URL = "https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/videos/__VIDEO_ID__";
-const video = document.getElementById('video');
-const qualityDiv = document.getElementById('quality-buttons');
-const statusDiv = document.getElementById('status');
-let hls = null;
+          printf '<!DOCTYPE html>\n' > "$PLAYER_FILE"
+          printf '<html>\n' >> "$PLAYER_FILE"
+          printf '<head>\n' >> "$PLAYER_FILE"
+          printf '<meta charset="UTF-8">\n' >> "$PLAYER_FILE"
+          printf '<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=yes">\n' >> "$PLAYER_FILE"
+          printf '<title>AVASAM HLS Player</title>\n' >> "$PLAYER_FILE"
+          printf '<style>\n' >> "$PLAYER_FILE"
+          printf '*{margin:0;padding:0;box-sizing:border-box}\n' >> "$PLAYER_FILE"
+          printf 'body{background:#000;font-family:system-ui}\n' >> "$PLAYER_FILE"
+          printf '.container{display:flex;flex-direction:column;height:100vh}\n' >> "$PLAYER_FILE"
+          printf 'video{flex:1;width:100%%;object-fit:contain}\n' >> "$PLAYER_FILE"
+          printf '.controls{background:#1a1a1a;padding:12px;display:flex;gap:10px;flex-wrap:wrap;justify-content:center;border-top:1px solid #333}\n' >> "$PLAYER_FILE"
+          printf 'button{background:#333;border:none;color:#fff;padding:8px 16px;border-radius:6px;cursor:pointer}\n' >> "$PLAYER_FILE"
+          printf 'button.active{background:#007aff}\n' >> "$PLAYER_FILE"
+          printf '.status{position:fixed;bottom:10px;left:10px;background:rgba(0,0,0,0.7);color:#0f0;padding:4px 12px;border-radius:16px;font-size:12px;font-family:monospace;pointer-events:none}\n' >> "$PLAYER_FILE"
+          printf '</style>\n' >> "$PLAYER_FILE"
+          printf '</head>\n' >> "$PLAYER_FILE"
+          printf '<body>\n' >> "$PLAYER_FILE"
+          printf '<div class="container">\n' >> "$PLAYER_FILE"
+          printf '<video id="video" controls playsinline></video>\n' >> "$PLAYER_FILE"
+          printf '<div class="controls" id="quality-buttons"></div>\n' >> "$PLAYER_FILE"
+          printf '</div>\n' >> "$PLAYER_FILE"
+          printf '<div class="status" id="status">Loading...</div>\n' >> "$PLAYER_FILE"
+          printf '<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>\n' >> "$PLAYER_FILE"
+          printf '<script>\n' >> "$PLAYER_FILE"
+          printf 'const BASE_URL = "https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/videos/${VIDEO_ID}";\n' >> "$PLAYER_FILE"
+          printf 'const video = document.getElementById("video");\n' >> "$PLAYER_FILE"
+          printf 'const qualityDiv = document.getElementById("quality-buttons");\n' >> "$PLAYER_FILE"
+          printf 'const statusDiv = document.getElementById("status");\n' >> "$PLAYER_FILE"
+          printf 'let hls = null;\n' >> "$PLAYER_FILE"
+          printf 'function log(msg, isError){statusDiv.innerHTML=msg;statusDiv.style.color=isError?"#ff6b6b":"#8bc34a";console.log(msg);}\n' >> "$PLAYER_FILE"
+          printf 'async function fetchQualities(){\n' >> "$PLAYER_FILE"
+          printf 'const masterUrl = BASE_URL + "/master.m3u8";\n' >> "$PLAYER_FILE"
+          printf 'log("Fetching "+masterUrl);\n' >> "$PLAYER_FILE"
+          printf 'const res = await fetch(masterUrl);\n' >> "$PLAYER_FILE"
+          printf 'if(!res.ok) throw new Error("master.m3u8 HTTP "+res.status);\n' >> "$PLAYER_FILE"
+          printf 'const text = await res.text();\n' >> "$PLAYER_FILE"
+          printf 'const lines = text.split("\\n");\n' >> "$PLAYER_FILE"
+          printf 'const qualities = [];\n' >> "$PLAYER_FILE"
+          printf 'for(let i=0;i<lines.length;i++){\n' >> "$PLAYER_FILE"
+          printf 'const line = lines[i].trim();\n' >> "$PLAYER_FILE"
+          printf 'if(line.includes("#EXT-X-STREAM-INF") && line.includes("RESOLUTION=")){\n' >> "$PLAYER_FILE"
+          printf 'const match = line.match(/RESOLUTION=\\d+x(\\d+)/);\n' >> "$PLAYER_FILE"
+          printf 'if(match && i+1 < lines.length){\n' >> "$PLAYER_FILE"
+          printf 'const resolution = match[1];\n' >> "$PLAYER_FILE"
+          printf 'let playlist = lines[i+1].trim();\n' >> "$PLAYER_FILE"
+          printf 'if(!playlist.startsWith("http")) playlist = BASE_URL + "/" + playlist;\n' >> "$PLAYER_FILE"
+          printf 'qualities.push({ label: resolution+"p", url: playlist, quality: resolution });\n' >> "$PLAYER_FILE"
+          printf '}}}\n' >> "$PLAYER_FILE"
+          printf 'if(qualities.length===0) throw new Error("No quality found");\n' >> "$PLAYER_FILE"
+          printf 'qualities.sort((a,b)=>parseInt(b.label)-parseInt(a.label));\n' >> "$PLAYER_FILE"
+          printf 'return qualities;\n' >> "$PLAYER_FILE"
+          printf '}\n' >> "$PLAYER_FILE"
+          printf 'async function fixM3u8Segments(playlistUrl, quality){\n' >> "$PLAYER_FILE"
+          printf 'const res = await fetch(playlistUrl);\n' >> "$PLAYER_FILE"
+          printf 'if(!res.ok) throw new Error("playlist HTTP "+res.status);\n' >> "$PLAYER_FILE"
+          printf 'let content = await res.text();\n' >> "$PLAYER_FILE"
+          printf 'const lines = content.split("\\n");\n' >> "$PLAYER_FILE"
+          printf 'const newLines = [];\n' >> "$PLAYER_FILE"
+          printf 'for(let line of lines){\n' >> "$PLAYER_FILE"
+          printf 'line = line.trim();\n' >> "$PLAYER_FILE"
+          printf 'if(line && !line.startsWith("#") && line.endsWith(".ts")){\n' >> "$PLAYER_FILE"
+          printf 'const corrected = `${BASE_URL}/segments/${quality}p/${line}`;\n' >> "$PLAYER_FILE"
+          printf 'newLines.push(corrected);\n' >> "$PLAYER_FILE"
+          printf '} else { newLines.push(line); }\n' >> "$PLAYER_FILE"
+          printf '}\n' >> "$PLAYER_FILE"
+          printf 'return newLines.join("\\n");\n' >> "$PLAYER_FILE"
+          printf '}\n' >> "$PLAYER_FILE"
+          printf 'async function playQuality(qualityUrl, label, qualityNum){\n' >> "$PLAYER_FILE"
+          printf 'const currentTime = video.currentTime;\n' >> "$PLAYER_FILE"
+          printf 'const wasPlaying = !video.paused;\n' >> "$PLAYER_FILE"
+          printf 'log("Loading "+label+"...");\n' >> "$PLAYER_FILE"
+          printf 'let fixed;\n' >> "$PLAYER_FILE"
+          printf 'try { fixed = await fixM3u8Segments(qualityUrl, qualityNum); }\n' >> "$PLAYER_FILE"
+          printf 'catch(e){ log(e.message,true); return; }\n' >> "$PLAYER_FILE"
+          printf 'const blob = new Blob([fixed], {type:"application/vnd.apple.mpegurl"});\n' >> "$PLAYER_FILE"
+          printf 'const blobUrl = URL.createObjectURL(blob);\n' >> "$PLAYER_FILE"
+          printf 'if(hls){ hls.destroy(); hls=null; }\n' >> "$PLAYER_FILE"
+          printf 'if(Hls.isSupported()){\n' >> "$PLAYER_FILE"
+          printf 'hls = new Hls({ capLevelToPlayerSize: true });\n' >> "$PLAYER_FILE"
+          printf 'hls.loadSource(blobUrl);\n' >> "$PLAYER_FILE"
+          printf 'hls.attachMedia(video);\n' >> "$PLAYER_FILE"
+          printf 'hls.on(Hls.Events.MANIFEST_PARSED, ()=>{\n' >> "$PLAYER_FILE"
+          printf 'video.currentTime = currentTime;\n' >> "$PLAYER_FILE"
+          printf 'if(wasPlaying) video.play();\n' >> "$PLAYER_FILE"
+          printf 'log("Playing "+label);\n' >> "$PLAYER_FILE"
+          printf '});\n' >> "$PLAYER_FILE"
+          printf 'hls.on(Hls.Events.ERROR, (_,data)=>log("HLS error: "+data.type, true));\n' >> "$PLAYER_FILE"
+          printf '} else if(video.canPlayType("application/vnd.apple.mpegurl")){\n' >> "$PLAYER_FILE"
+          printf 'video.src = blobUrl;\n' >> "$PLAYER_FILE"
+          printf 'video.addEventListener("loadedmetadata",()=>{ video.currentTime=currentTime; if(wasPlaying) video.play(); });\n' >> "$PLAYER_FILE"
+          printf 'log("Playing "+label+" (native)");\n' >> "$PLAYER_FILE"
+          printf '} else { log("HLS not supported", true); }\n' >> "$PLAYER_FILE"
+          printf '}\n' >> "$PLAYER_FILE"
+          printf 'async function init(){\n' >> "$PLAYER_FILE"
+          printf 'try{\n' >> "$PLAYER_FILE"
+          printf 'const qualities = await fetchQualities();\n' >> "$PLAYER_FILE"
+          printf 'qualityDiv.innerHTML = "";\n' >> "$PLAYER_FILE"
+          printf 'qualities.forEach((q,idx)=>{\n' >> "$PLAYER_FILE"
+          printf 'const btn = document.createElement("button");\n' >> "$PLAYER_FILE"
+          printf 'btn.textContent = q.label;\n' >> "$PLAYER_FILE"
+          printf 'btn.onclick = ()=>{\n' >> "$PLAYER_FILE"
+          printf 'document.querySelectorAll("#quality-buttons button").forEach(b=>b.classList.remove("active"));\n' >> "$PLAYER_FILE"
+          printf 'btn.classList.add("active");\n' >> "$PLAYER_FILE"
+          printf 'playQuality(q.url, q.label, q.quality);\n' >> "$PLAYER_FILE"
+          printf '};\n' >> "$PLAYER_FILE"
+          printf 'qualityDiv.appendChild(btn);\n' >> "$PLAYER_FILE"
+          printf 'if(idx===0) btn.click();\n' >> "$PLAYER_FILE"
+          printf '});\n' >> "$PLAYER_FILE"
+          printf '} catch(err){ log("Init error: "+err.message, true); qualityDiv.innerHTML=`<div style="color:#ff6b6b">Error: ${err.message}</div>`; }\n' >> "$PLAYER_FILE"
+          printf '}\n' >> "$PLAYER_FILE"
+          printf 'init();\n' >> "$PLAYER_FILE"
+          printf '</script>\n' >> "$PLAYER_FILE"
+          printf '</body>\n' >> "$PLAYER_FILE"
+          printf '</html>\n' >> "$PLAYER_FILE"
 
-function log(msg, isError) {
-  statusDiv.innerHTML = msg;
-  statusDiv.style.color = isError ? "#ff6b6b" : "#8bc34a";
-  console.log(msg);
-}
-
-async function fetchQualities() {
-  const masterUrl = BASE_URL + "/master.m3u8";
-  log("Fetching " + masterUrl);
-  const res = await fetch(masterUrl);
-  if (!res.ok) throw new Error("master.m3u8 HTTP " + res.status);
-  const text = await res.text();
-  const lines = text.split("\n");
-  const qualities = [];
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (line.includes("#EXT-X-STREAM-INF") && line.includes("RESOLUTION=")) {
-      const match = line.match(/RESOLUTION=\d+x(\d+)/);
-      if (match && i+1 < lines.length) {
-        const resolution = match[1];
-        let playlist = lines[i+1].trim();
-        if (!playlist.startsWith("http")) playlist = BASE_URL + "/" + playlist;
-        qualities.push({ label: resolution + "p", url: playlist, quality: resolution });
-      }
-    }
-  }
-  if (qualities.length === 0) throw new Error("No quality found");
-  qualities.sort((a,b) => parseInt(b.label) - parseInt(a.label));
-  return qualities;
-}
-
-async function fixM3u8Segments(playlistUrl, quality) {
-  const res = await fetch(playlistUrl);
-  if (!res.ok) throw new Error("playlist HTTP " + res.status);
-  let content = await res.text();
-  const lines = content.split("\n");
-  const newLines = [];
-  for (let line of lines) {
-    line = line.trim();
-    if (line && !line.startsWith("#") && line.endsWith(".ts")) {
-      const corrected = `${BASE_URL}/segments/${quality}p/${line}`;
-      newLines.push(corrected);
-    } else {
-      newLines.push(line);
-    }
-  }
-  return newLines.join("\n");
-}
-
-async function playQuality(qualityUrl, label, qualityNum) {
-  const currentTime = video.currentTime;
-  const wasPlaying = !video.paused;
-  log("Loading " + label + "...");
-  let fixed;
-  try {
-    fixed = await fixM3u8Segments(qualityUrl, qualityNum);
-  } catch (e) {
-    log(e.message, true);
-    return;
-  }
-  const blob = new Blob([fixed], { type: "application/vnd.apple.mpegurl" });
-  const blobUrl = URL.createObjectURL(blob);
-
-  if (hls) { hls.destroy(); hls = null; }
-
-  if (Hls.isSupported()) {
-    hls = new Hls({ capLevelToPlayerSize: true });
-    hls.loadSource(blobUrl);
-    hls.attachMedia(video);
-    hls.on(Hls.Events.MANIFEST_PARSED, () => {
-      video.currentTime = currentTime;
-      if (wasPlaying) video.play();
-      log("Playing " + label);
-    });
-    hls.on(Hls.Events.ERROR, (_, data) => log("HLS error: " + data.type, true));
-  } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-    video.src = blobUrl;
-    video.addEventListener("loadedmetadata", () => {
-      video.currentTime = currentTime;
-      if (wasPlaying) video.play();
-    });
-    log("Playing " + label + " (native)");
-  } else {
-    log("HLS not supported", true);
-  }
-}
-
-async function init() {
-  try {
-    const qualities = await fetchQualities();
-    qualityDiv.innerHTML = "";
-    qualities.forEach((q, idx) => {
-      const btn = document.createElement("button");
-      btn.textContent = q.label;
-      btn.onclick = () => {
-        document.querySelectorAll("#quality-buttons button").forEach(b => b.classList.remove("active"));
-        btn.classList.add("active");
-        playQuality(q.url, q.label, q.quality);
-      };
-      qualityDiv.appendChild(btn);
-      if (idx === 0) btn.click();
-    });
-  } catch (err) {
-    log("Init error: " + err.message, true);
-    qualityDiv.innerHTML = `<div style="color:#ff6b6b">Error: ${err.message}</div>`;
-  }
-}
-
-init();
-</script>
-</body>
-</html>
-PLAYER_HTML_EOF
-
-          # Replace the placeholder VIDEO_ID with the actual ID
-          sed -i "s|__VIDEO_ID__|${VIDEO_ID}|g" "$PLAYER_FILE"
+          # Replace variables in player.html
+          sed -i "s|\${GITHUB_REPOSITORY_OWNER}|${{ github.repository_owner }}|g" "${VIDEO_DIR}/player.html"
+          sed -i "s|\${GITHUB_REPOSITORY_NAME#*/}|${{ github.event.repository.name }}|g" "${VIDEO_DIR}/player.html"
+          sed -i "s|\${GITHUB_REF_NAME#refs/heads/}|${GITHUB_REF_NAME}|g" "${VIDEO_DIR}/player.html"
+          sed -i "s|\${VIDEO_ID}|${VIDEO_ID}|g" "${VIDEO_DIR}/player.html"
 
           echo "✅ Done. Output: $VIDEO_DIR"
+          echo "📁 Video ID: $VIDEO_ID"
+          echo "🔗 Player URL: https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/${VIDEO_DIR}/player.html"
 
       - name: Stop WARP
         if: always()
@@ -359,7 +343,7 @@ PLAYER_HTML_EOF
       - name: Commit & Push
         run: |
           git config user.name "github-actions"
-          git config user.email "actions@github.com"
+          git config.user.email "actions@github.com"
           git add videos/
           git commit -m "Ultra fast HLS video [skip ci]" || true
           git pull --rebase origin "${{ github.ref_name }}" || true
