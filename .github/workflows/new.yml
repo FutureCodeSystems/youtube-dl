@@ -67,15 +67,25 @@ jobs:
           QUALITY="${{ github.event.inputs.quality }}"
           mkdir -p videos
 
-          if [ "$WARP_FAILED" = "true" ]; then
-            PROXY_OPT=""
-          else
+          PROXY_OPT=""
+          if [ "$WARP_FAILED" != "true" ]; then
             PROXY_OPT="--proxy socks5://127.0.0.1:1080"
           fi
 
-          VIDEO_ID=$(yt-dlp $PROXY_OPT --get-id --no-playlist "$URL")
-          VIDEO_TITLE=$(yt-dlp $PROXY_OPT --get-title --no-playlist "$URL" | sed 's/[^a-zA-Z0-9\-_ ]/ /g' | cut -c1-100)
-          if [ -z "$VIDEO_ID" ]; then echo "❌ Failed to get video ID"; exit 1; fi
+          # Get both ID and title in a single yt-dlp call (tab-separated)
+          INFO=$(yt-dlp $PROXY_OPT --print "%(id)s\t%(title)s" --no-playlist "$URL")
+          VIDEO_ID=$(echo "$INFO" | head -1 | cut -f1)
+          VIDEO_TITLE=$(echo "$INFO" | head -1 | cut -f2-)
+
+          if [ -z "$VIDEO_ID" ]; then
+            echo "❌ Failed to get video info"
+            exit 1
+          fi
+
+          # Sanitize and safely truncate title (character-wise, UTF-8 safe)
+          SAFE_TITLE=$(echo "$VIDEO_TITLE" | sed 's/[^a-zA-Z0-9\-_ ]/ /g' | head -c 100 | sed 's/ *$//')
+          # Alternative: use bash substring (character-safe) but ensure length not exceed
+          # SAFE_TITLE="${SAFE_TITLE:0:100}"   # already done via head -c 100
 
           VIDEO_DIR="videos/${VIDEO_ID}"
           SEGMENTS_DIR="${VIDEO_DIR}/segments"
@@ -84,11 +94,13 @@ jobs:
           {
             echo "Video ID: $VIDEO_ID"
             echo "Original Title: ${VIDEO_TITLE:-Unknown}"
+            echo "Safe Title: $SAFE_TITLE"
             echo "YouTube URL: $URL"
             echo "Download Date: $(date)"
             echo "Quality Requested: $QUALITY"
           } > "${VIDEO_DIR}/video_info.txt"
 
+          # Determine qualities based on input
           case "$QUALITY" in
             best)   QUALITIES=("1080" "720" "480") ;;
             1080)   QUALITIES=("1080") ;;
@@ -98,25 +110,40 @@ jobs:
             *)      QUALITIES=("1080" "720" "480") ;;
           esac
 
+          # Map quality to resolution and bandwidth for master playlist
+          declare -A RES_MAP BW_MAP
+          RES_MAP=( ["1080"]="1920x1080" ["720"]="1280x720" ["480"]="854x480" )
+          BW_MAP=( ["1080"]="5000000" ["720"]="2800000" ["480"]="1400000" )
+
           # Process each quality
           for Q in "${QUALITIES[@]}"; do
             if [ "$Q" == "audio" ]; then
-              echo "🎵 Downloading audio..."
+              echo "🎵 Downloading & segmenting audio..."
+              TEMP_AUDIO="tmp_audio.m4a"
               yt-dlp $PROXY_OPT \
                 --format "bestaudio" \
                 --extract-audio --audio-format m4a \
-                --output "${SEGMENTS_DIR}/audio.m4a" \
+                --output "$TEMP_AUDIO" \
                 --no-playlist --no-mtime \
-                "$URL" && {
-                  printf '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-ALLOW-CACHE:YES\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:10.0,\nsegments/audio.m4a\n#EXT-X-ENDLIST\n' > "${VIDEO_DIR}/audio.m3u8"
-                  echo "✅ Audio done"
-                }
+                "$URL" || { echo "⚠️ Audio download failed"; continue; }
+
+              mkdir -p "${SEGMENTS_DIR}/audio"
+              ffmpeg -i "$TEMP_AUDIO" \
+                -c:a aac -b:a 128k \
+                -f hls -hls_time 10 -hls_list_size 0 \
+                -hls_segment_filename "segments/audio/segment_%03d.ts" \
+                -hls_flags independent_segments \
+                "${VIDEO_DIR}/audio.m3u8" -loglevel error
+
+              rm -f "$TEMP_AUDIO"
+              echo "✅ Audio done"
               continue
             fi
 
             echo "🎬 Processing ${Q}p"
             TEMP_MP4="tmp_${Q}.mp4"
 
+            # Try best single video+audio format, fallback to separate video and audio
             yt-dlp $PROXY_OPT \
               --format "best[height<=${Q}][ext=mp4]/best[height<=${Q}]" \
               --output "$TEMP_MP4" \
@@ -132,7 +159,7 @@ jobs:
               }
 
             if [ ! -f "$TEMP_MP4" ]; then
-              echo "⚠️ ${Q}p unavailable"
+              echo "⚠️ ${Q}p download failed or unavailable"
               continue
             fi
 
@@ -140,15 +167,12 @@ jobs:
 
             ffmpeg -i "$TEMP_MP4" \
               -c:v libx264 -preset ultrafast -crf 28 -tune fastdecode \
-              -c:a aac -b:a 128k -movflags +faststart \
+              -c:a aac -b:a 128k \
               -f hls -hls_time 10 -hls_list_size 0 \
-              -hls_segment_filename "${SEGMENTS_DIR}/${Q}p/segment_%03d.ts" \
+              -hls_segment_filename "segments/${Q}p/segment_%03d.ts" \
               -hls_flags independent_segments \
               -threads auto \
               "${VIDEO_DIR}/${Q}p.m3u8" -loglevel error
-
-            # Fix paths inside m3u8: replace "segment_XXX.ts" with "segments/${Q}p/segment_XXX.ts"
-            sed -i "s|segment_|segments/${Q}p/segment_|g" "${VIDEO_DIR}/${Q}p.m3u8"
 
             rm -f "$TEMP_MP4"
             echo "✅ ${Q}p done"
@@ -158,74 +182,20 @@ jobs:
           MASTER="${VIDEO_DIR}/master.m3u8"
           printf '#EXTM3U\n#EXT-X-VERSION:3\n' > "$MASTER"
           for Q in "${QUALITIES[@]}"; do
-            if [ "$Q" != "audio" ] && [ -f "${VIDEO_DIR}/${Q}p.m3u8" ]; then
-              BANDWIDTH=$((Q * 1000))
-              printf '#EXT-X-STREAM-INF:BANDWIDTH=%d000,RESOLUTION=1920x%s\n' "$BANDWIDTH" "$Q" >> "$MASTER"
+            if [ "$Q" == "audio" ]; then
+              if [ -f "${VIDEO_DIR}/audio.m3u8" ]; then
+                printf '#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS="mp4a.40.2"\n' >> "$MASTER"
+                printf 'audio.m3u8\n' >> "$MASTER"
+              fi
+            elif [ -f "${VIDEO_DIR}/${Q}p.m3u8" ]; then
+              BANDWIDTH="${BW_MAP[$Q]}"
+              RES="${RES_MAP[$Q]}"
+              printf '#EXT-X-STREAM-INF:BANDWIDTH=%s,RESOLUTION=%s\n' "$BANDWIDTH" "$RES" >> "$MASTER"
               printf '%sp.m3u8\n' "$Q" >> "$MASTER"
             fi
           done
-          [ -f "${VIDEO_DIR}/audio.m3u8" ] && printf '#EXT-X-STREAM-INF:BANDWIDTH=128000,CODECS="mp4a.40.2"\naudio.m3u8\n' >> "$MASTER"
 
-          # Generate player.html safely using printf (no HEREDOC issues)
-          PLAYER_FILE="${VIDEO_DIR}/player.html"
-          printf '%s\n' '<!DOCTYPE html>' > "$PLAYER_FILE"
-          printf '%s\n' '<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=yes"><title>AVASAM HLS Player</title>' >> "$PLAYER_FILE"
-          printf '%s\n' '<link href="https://vjs.zencdn.net/8.10/video-js.min.css" rel="stylesheet">' >> "$PLAYER_FILE"
-          printf '%s\n' '<style>body{background:#000;margin:0;padding:0}.video-js{width:100%;height:100vh}</style>' >> "$PLAYER_FILE"
-          printf '%s\n' '</head><body>' >> "$PLAYER_FILE"
-          printf '%s\n' '<video id="player" class="video-js vjs-16-9 vjs-big-play-centered" controls preload="auto" playsinline></video>' >> "$PLAYER_FILE"
-          printf '%s\n' '<script src="https://vjs.zencdn.net/8.10/video.min.js"></script>' >> "$PLAYER_FILE"
-          printf '%s\n' '<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>' >> "$PLAYER_FILE"
-          printf '%s\n' '<script>' >> "$PLAYER_FILE"
-          printf '%s\n' '(function(){' >> "$PLAYER_FILE"
-          printf '%s\n' 'const BASE_URL = "https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/${GITHUB_REF_NAME}/videos/${VIDEO_ID}";' >> "$PLAYER_FILE"
-          printf '%s\n' 'const video = document.getElementById("player");' >> "$PLAYER_FILE"
-          printf '%s\n' 'let hls = null;' >> "$PLAYER_FILE"
-          printf '%s\n' 'async function fetchQualities(){' >> "$PLAYER_FILE"
-          printf '%s\n' 'const res=await fetch(BASE_URL+"/master.m3u8");' >> "$PLAYER_FILE"
-          printf '%s\n' 'const txt=await res.text();' >> "$PLAYER_FILE"
-          printf '%s\n' 'const lines=txt.split("\\n");' >> "$PLAYER_FILE"
-          printf '%s\n' 'const qs=[];' >> "$PLAYER_FILE"
-          printf '%s\n' 'for(let i=0;i<lines.length;i++){' >> "$PLAYER_FILE"
-          printf '%s\n' 'const line=lines[i];' >> "$PLAYER_FILE"
-          printf '%s\n' 'if(line.includes("#EXT-X-STREAM-INF")&&line.includes("RESOLUTION=")){' >> "$PLAYER_FILE"
-          printf '%s\n' 'const m=line.match(/RESOLUTION=\\d+x(\\d+)/);' >> "$PLAYER_FILE"
-          printf '%s\n' 'if(m&&i+1<lines.length){' >> "$PLAYER_FILE"
-          printf '%s\n' 'let url=lines[i+1].trim();' >> "$PLAYER_FILE"
-          printf '%s\n' 'if(!url.startsWith("http")) url=BASE_URL+"/"+url;' >> "$PLAYER_FILE"
-          printf '%s\n' 'qs.push({label:m[1]+"p",url});' >> "$PLAYER_FILE"
-          printf '%s\n' '}}}' >> "$PLAYER_FILE"
-          printf '%s\n' 'return qs;' >> "$PLAYER_FILE"
-          printf '%s\n' '}' >> "$PLAYER_FILE"
-          printf '%s\n' 'async function playQuality(url){' >> "$PLAYER_FILE"
-          printf '%s\n' 'const ct=video.currentTime, wasPlaying=!video.paused;' >> "$PLAYER_FILE"
-          printf '%s\n' 'const res=await fetch(url);' >> "$PLAYER_FILE"
-          printf '%s\n' 'let text=await res.text();' >> "$PLAYER_FILE"
-          printf '%s\n' 'const lines=text.split("\\n");' >> "$PLAYER_FILE"
-          printf '%s\n' 'const fixed=lines.map(l=>{' >> "$PLAYER_FILE"
-          printf '%s\n' 'l=l.trim();' >> "$PLAYER_FILE"
-          printf '%s\n' 'if(l&&!l.startsWith("#")&&l.endsWith(".ts"))return BASE_URL+"/"+l;' >> "$PLAYER_FILE"
-          printf '%s\n' 'return l;' >> "$PLAYER_FILE"
-          printf '%s\n' '}).join("\\n");' >> "$PLAYER_FILE"
-          printf '%s\n' 'const blob=new Blob([fixed],{type:"application/vnd.apple.mpegurl"});' >> "$PLAYER_FILE"
-          printf '%s\n' 'const blobUrl=URL.createObjectURL(blob);' >> "$PLAYER_FILE"
-          printf '%s\n' 'if(hls)hls.destroy();' >> "$PLAYER_FILE"
-          printf '%s\n' 'if(Hls.isSupported()){' >> "$PLAYER_FILE"
-          printf '%s\n' 'hls=new Hls();hls.loadSource(blobUrl);hls.attachMedia(video);' >> "$PLAYER_FILE"
-          printf '%s\n' 'hls.on(Hls.Events.MANIFEST_PARSED,()=>{video.currentTime=ct;if(wasPlaying)video.play();});' >> "$PLAYER_FILE"
-          printf '%s\n' '}else if(video.canPlayType("application/vnd.apple.mpegurl")){' >> "$PLAYER_FILE"
-          printf '%s\n' 'video.src=blobUrl;video.addEventListener("loadedmetadata",()=>{video.currentTime=ct;if(wasPlaying)video.play();});' >> "$PLAYER_FILE"
-          printf '%s\n' '}}' >> "$PLAYER_FILE"
-          printf '%s\n' 'async function init(){' >> "$PLAYER_FILE"
-          printf '%s\n' 'const qualities=await fetchQualities();' >> "$PLAYER_FILE"
-          printf '%s\n' 'if(qualities.length)playQuality(qualities[0].url);' >> "$PLAYER_FILE"
-          printf '%s\n' '}' >> "$PLAYER_FILE"
-          printf '%s\n' 'init();' >> "$PLAYER_FILE"
-          printf '%s\n' '})();' >> "$PLAYER_FILE"
-          printf '%s\n' '</script>' >> "$PLAYER_FILE"
-          printf '%s\n' '</body></html>' >> "$PLAYER_FILE"
-
-          echo "✅ Done. Output: $VIDEO_DIR"
+          echo "✅ All done. Output: $VIDEO_DIR"
 
       - name: Stop WARP
         if: always()
@@ -236,6 +206,12 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           git add videos/
-          git commit -m "Ultra fast HLS video [skip ci]" || true
-          git pull --rebase origin "${{ github.ref_name }}" || true
+          # Only commit if there are changes
+          if git diff --quiet --staged; then
+            echo "No changes to commit"
+          else
+            git commit -m "Ultra fast HLS video [skip ci]"
+          fi
+          # Pull with rebase, abort on conflict (will fail the job)
+          git pull --rebase origin "${{ github.ref_name }}" || { echo "❌ Rebase failed"; exit 1; }
           git push origin HEAD:"${{ github.ref_name }}"
