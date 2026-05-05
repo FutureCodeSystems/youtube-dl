@@ -1,4 +1,4 @@
-name: Clean directories except workflows
+name: Clean everything except workflows
 
 on:
   push:
@@ -13,22 +13,37 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       
-    - name: Clean all directories except workflows
+    - name: Show current structure (before cleanup)
       run: |
-        # پیدا کردن همه پوشه‌ها به جز .github/workflows
-        find . -maxdepth 1 -type d ! -name "." ! -name ".github" ! -name ".git" | while read dir; do
-          echo "Deleting directory: $dir"
-          rm -rf "$dir"
-        done
+        echo "=== Current structure ==="
+        ls -la
+        echo ""
+        echo "=== All directories ==="
+        find . -maxdepth 1 -type d
+      
+    - name: Remove all files and directories except .github/workflows
+      run: |
+        # حذف همه فایل‌ها در ریشه
+        find . -maxdepth 1 -type f -not -name ".gitkeep" -delete
         
-        # اگر پوشه .github وجود دارد اما workflows را حفظ کنیم
+        # حذف همه پوشه‌ها به جز .github و .git
+        find . -maxdepth 1 -type d -not -name "." -not -name ".github" -not -name ".git" -exec rm -rf {} +
+        
+        # حالا داخل پوشه .github: همه چیز را حذف کن به جز workflows
         if [ -d ".github" ]; then
-          # پیدا کردن همه چیز داخل .github به جز workflows
-          find .github -maxdepth 1 ! -name ".github" ! -name "workflows" -type d -exec rm -rf {} + 2>/dev/null || true
-          find .github -maxdepth 1 ! -name ".github" ! -name "workflows" -type f -exec rm -f {} + 2>/dev/null || true
+          find .github -maxdepth 1 -not -name ".github" -not -name "workflows" -exec rm -rf {} + 2>/dev/null || true
         fi
         
-    - name: List remaining files
+    - name: Verify result
       run: |
-        echo "Remaining directories:"
+        echo "=== Result after cleanup ==="
         ls -la
+        echo ""
+        if [ -d ".github/workflows" ]; then
+          echo "✅ SUCCESS: .github/workflows still exists"
+          echo "Contents of workflows:"
+          ls -la .github/workflows/
+        else
+          echo "❌ ERROR: .github/workflows was deleted!"
+          exit 1
+        fi
